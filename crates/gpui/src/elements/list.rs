@@ -894,19 +894,21 @@ impl StateInner {
         current_view: EntityId,
         window: &mut Window,
         cx: &mut App,
-    ) {
+    ) -> bool {
         // Drop scroll events after a reset, since we can't calculate
         // the new logical scroll top without the item heights
         if self.reset || delta.y == px(0.) {
-            return;
+            return false;
         }
 
         let padding = self.last_padding.unwrap_or_default();
         let scroll_max =
             (self.items.summary().height + padding.top + padding.bottom - height).max(px(0.));
-        let new_scroll_top = (self.scroll_top(scroll_top) - delta.y)
-            .max(px(0.))
-            .min(scroll_max);
+        let previous_scroll_top = self.scroll_top(scroll_top);
+        let new_scroll_top = (previous_scroll_top - delta.y).max(px(0.)).min(scroll_max);
+        // Whether the list moved, for nested scrolling; the rest still runs so
+        // a scroll at the bounds still ends following the tail.
+        let moved = new_scroll_top != previous_scroll_top;
 
         if self.alignment == ListAlignment::Bottom && new_scroll_top == scroll_max {
             self.set_scroll_anchor(None);
@@ -944,6 +946,7 @@ impl StateInner {
 
         crate::fast::layers::invalidate::note_list_scrolled(window, &self.version, current_view);
         cx.notify(current_view);
+        moved
     }
 
     pub(crate) fn logical_scroll_top(&self) -> ListOffset {
@@ -1575,8 +1578,13 @@ impl Element for List {
                         window.rem_size(),
                     );
 
+                    // Measure at the width prepaint lays items out at once it is
+                    // known; rows that wrap are taller than at max-content width.
+                    let available_width = state.last_layout_bounds.map(|bounds| {
+                        (bounds.size.width - padding.left - padding.right).max(px(0.))
+                    });
                     let layout_response = state.layout_items(
-                        None,
+                        available_width,
                         available_height,
                         &padding,
                         &mut self.render_item,
@@ -1723,14 +1731,18 @@ impl Element for List {
             if phase == DispatchPhase::Bubble && hitbox_id.should_handle_scroll(window) {
                 accumulated_scroll_delta = accumulated_scroll_delta.coalesce(event.delta);
                 let pixel_delta = accumulated_scroll_delta.pixel_delta(px(20.));
-                list_state.0.borrow_mut().scroll(
+                let scrolled = list_state.0.borrow_mut().scroll(
                     &scroll_top,
                     height,
                     pixel_delta,
                     current_view,
                     window,
                     cx,
-                )
+                );
+                // Nested scrolling, as in div: ancestors get the event only at the list's bounds.
+                if scrolled {
+                    cx.stop_propagation();
+                }
             }
         });
 

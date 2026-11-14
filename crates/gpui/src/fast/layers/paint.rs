@@ -696,6 +696,7 @@ fn clip_primitive(primitive: &mut Primitive, viewports: Viewports) {
         Primitive::SubpixelSprite(p) => clip(&mut p.content_mask),
         Primitive::PolychromeSprite(p) => clip(&mut p.content_mask),
         Primitive::Surface(p) => clip(&mut p.content_mask),
+        Primitive::Backdrop(p) => clip(&mut p.content_mask),
     }
 }
 
@@ -750,11 +751,19 @@ fn repaint(
         origin: region.origin + to_content,
         size: region.size,
     };
-    let (content, overlay) = crate::fast::layers::overlay::lift(content);
-    let has_paths = content
-        .paint_operations
-        .iter()
-        .any(|operation| matches!(operation, PaintOperation::Primitive(Primitive::Path(_))));
+    // Glass reads what is drawn beneath it, which tiles cannot hold: content
+    // with a backdrop is drawn into the frame, like paths no overlay can lift.
+    let has_backdrops = !content.backdrops.is_empty();
+    let (content, overlay) = if has_backdrops {
+        (content, Rc::from([]))
+    } else {
+        crate::fast::layers::overlay::lift(content)
+    };
+    let has_paths = has_backdrops
+        || content
+            .paint_operations
+            .iter()
+            .any(|operation| matches!(operation, PaintOperation::Primitive(Primitive::Path(_))));
     let mut visible = painting.viewport.scale(scale_factor);
     visible.origin += to_content;
     let mut rendered_work = 0;

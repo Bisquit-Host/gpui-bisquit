@@ -139,13 +139,15 @@ pub struct MetalRenderer {
     /// For headless rendering, tracks whether output should be opaque
     pub(crate) opaque: bool,
     pub(crate) command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
-    pub(crate) paths_rasterization_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    pub(crate) paths_rasterization_pipeline_state:
+        Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     path_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     shadows_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     quads_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     underlines_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     monochrome_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
-    pub(crate) polychrome_sprites_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    pub(crate) polychrome_sprites_pipeline_state:
+        Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     surfaces_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     pub(crate) unit_vertices: Retained<ProtocolObject<dyn MTLBuffer>>,
     pub(crate) instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
@@ -158,6 +160,13 @@ pub struct MetalRenderer {
     /// rendering headlessly without reading pixels back.
     #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
     headless_render_target: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
+    /// Layer settings kept so `restore_gpu_resources` can rebuild a released layer.
+    windowed: bool,
+    use_display_p3: bool,
+    contents_scale: f64,
+    /// The latest requested size, applied on restore if it changed while released.
+    drawable_size: Size<DevicePixels>,
+    gpu_resources_released: bool,
     pub(crate) fast_layers: crate::fast::layers::TileCache,
 }
 
@@ -179,7 +188,10 @@ impl MetalRenderer {
         let device = Self::create_device()?;
         let layer = CAMetalLayer::new();
         Self::configure_layer(&layer, &device, transparent, use_display_p3);
-        Self::new_internal(device, Some(layer), !transparent, instance_buffer_pool)
+        let mut renderer =
+            Self::new_internal(device, Some(layer), !transparent, instance_buffer_pool)?;
+        renderer.use_display_p3 = use_display_p3;
+        Ok(renderer)
     }
 
     /// Creates a renderer for a CAMetalLayer owned by a platform view, such as
@@ -422,7 +434,6 @@ impl MetalRenderer {
 
         Ok(Self {
             device,
-            layer,
             presents_with_transaction: false,
             display_link_mode: DisplayLinkMode::Detached,
             is_apple_gpu,
@@ -446,6 +457,12 @@ impl MetalRenderer {
             path_sample_count: PATH_SAMPLE_COUNT,
             #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
             headless_render_target: None,
+            windowed: layer.is_some(),
+            use_display_p3: false,
+            contents_scale: layer.as_ref().map_or(1.0, |layer| layer.contentsScale()),
+            drawable_size: size(DevicePixels(0), DevicePixels(0)),
+            gpu_resources_released: false,
+            layer,
             fast_layers: crate::fast::layers::TileCache::default(),
         })
     }
@@ -512,7 +529,21 @@ impl MetalRenderer {
         }
     }
 
+    pub fn update_contents_scale(&mut self, contents_scale: f64) {
+        self.contents_scale = contents_scale;
+        if let Some(layer) = &self.layer {
+            layer.setContentsScale(contents_scale);
+        }
+    }
+
     pub fn update_drawable_size(&mut self, size: Size<DevicePixels>) {
+        self.drawable_size = size;
+        if !self.gpu_resources_released {
+            self.apply_drawable_size(size);
+        }
+    }
+
+    fn apply_drawable_size(&mut self, size: Size<DevicePixels>) {
         if let Some(layer) = &self.layer {
             layer.setDrawableSize(CGSize::new(size.width.0 as f64, size.height.0 as f64));
         }
@@ -522,7 +553,55 @@ impl MetalRenderer {
         crate::fast::layers::TileCache::clear(&mut self.fast_layers);
     }
 
-    pub(crate) fn update_path_intermediate_textures(&mut self, size: Size<DevicePixels>) -> Result<()> {
+    /// Releases the layer and every resource a full paint recreates. Pipeline
+    /// state and the device stay warm for a fast restore. The window must
+    /// detach its display link first, since the link drives the old layer.
+    pub fn release_gpu_resources(&mut self) -> bool {
+        if self.gpu_resources_released {
+            return false;
+        }
+        self.gpu_resources_released = true;
+        if let Some(layer) = self.layer.take() {
+            self.contents_scale = layer.contentsScale();
+        }
+        self.path_intermediate_texture = None;
+        self.path_intermediate_msaa_texture = None;
+        self.sprite_atlas.clear();
+        self.fast_layers.clear();
+        self.core_video_texture_cache.flush(0);
+        #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
+        {
+            self.headless_render_target = None;
+        }
+        true
+    }
+
+    /// Rebuilds a released layer at the latest size. Atlas textures refill
+    /// lazily during the forced frame the window requests next.
+    pub fn restore_gpu_resources(&mut self) -> bool {
+        if !self.gpu_resources_released {
+            return false;
+        }
+        if self.windowed && self.layer.is_none() {
+            let layer = CAMetalLayer::new();
+            Self::configure_layer(&layer, &self.device, !self.opaque, self.use_display_p3);
+            layer.setContentsScale(self.contents_scale);
+            layer.setPresentsWithTransaction(self.presents_with_transaction);
+            self.layer = Some(layer);
+        }
+        self.gpu_resources_released = false;
+        self.apply_drawable_size(self.drawable_size);
+        true
+    }
+
+    pub fn gpu_resources_released(&self) -> bool {
+        self.gpu_resources_released
+    }
+
+    pub(crate) fn update_path_intermediate_textures(
+        &mut self,
+        size: Size<DevicePixels>,
+    ) -> Result<()> {
         // We are uncertain when this happens, but sometimes size can be 0 here. Most likely before
         // the layout pass on window creation. Zero-sized texture creation causes SIGABRT.
         // https://github.com/zed-industries/zed/issues/36229
@@ -600,6 +679,9 @@ impl MetalRenderer {
     }
 
     pub fn draw(&mut self, scene: &Scene) {
+        if self.gpu_resources_released {
+            return;
+        }
         let layer = match &self.layer {
             Some(l) => l.clone(),
             None => {
@@ -960,6 +1042,8 @@ impl MetalRenderer {
                     }
                 }
                 PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
+                // Liquid glass is only drawn by the mobile wgpu renderer.
+                PrimitiveBatch::Backdrops(_) => {}
             }
         }
 
@@ -1711,7 +1795,10 @@ pub(crate) struct InstanceBindings {
     pub(crate) surfaces: InstanceBinding,
 }
 
-pub(crate) fn write_instances(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<InstanceBindings> {
+pub(crate) fn write_instances(
+    scene: &Scene,
+    writer: &mut InstanceBufferWriter,
+) -> Result<InstanceBindings> {
     Ok(InstanceBindings {
         quads: writer.write(&scene.quads)?,
         shadows: writer.write(&scene.shadows)?,
@@ -1964,6 +2051,37 @@ mod tests {
         CVPixelBufferUnlockBaseAddress, kCVPixelBufferIOSurfacePropertiesKey,
     };
     use objc2_metal::MTLCommandBufferStatus;
+
+    #[test]
+    fn gpu_resources_restore_at_the_latest_hidden_size() -> Result<()> {
+        let mut renderer = MetalRenderer::new(Default::default(), false, false)?;
+        renderer.update_drawable_size(size(DevicePixels(64), DevicePixels(48)));
+        assert!(renderer.path_intermediate_texture.is_some());
+
+        assert!(renderer.release_gpu_resources());
+        assert!(!renderer.release_gpu_resources());
+        assert!(renderer.layer().is_none());
+        assert!(renderer.path_intermediate_texture.is_none());
+
+        let hidden_size = size(DevicePixels(96), DevicePixels(72));
+        renderer.update_drawable_size(hidden_size);
+        renderer.update_contents_scale(2.0);
+        assert!(renderer.path_intermediate_texture.is_none());
+
+        assert!(renderer.restore_gpu_resources());
+        assert!(!renderer.restore_gpu_resources());
+        let layer = renderer
+            .layer()
+            .context("restore should recreate the layer")?;
+        assert_eq!(layer.drawableSize(), CGSize::new(96.0, 72.0));
+        assert_eq!(layer.contentsScale(), 2.0);
+        let path_texture = renderer
+            .path_intermediate_texture
+            .as_deref()
+            .context("restore should recreate the path target")?;
+        assert_eq!((path_texture.width(), path_texture.height()), (96, 72));
+        Ok(())
+    }
 
     #[test]
     fn path_intermediate_textures_are_reused_until_resize() -> Result<()> {

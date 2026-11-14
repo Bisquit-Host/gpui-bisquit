@@ -358,6 +358,11 @@ pub(crate) fn move_primitive(primitive: &mut Primitive, delta: Point<ScaledPixel
             mv(&mut surface.bounds);
             mv(&mut surface.content_mask.bounds);
         }
+        Primitive::Backdrop(backdrop) => {
+            mv(&mut backdrop.bounds);
+            mv(&mut backdrop.content_mask.bounds);
+            mv(&mut backdrop.effect.shape);
+        }
     }
 }
 

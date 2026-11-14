@@ -52,6 +52,8 @@ type StackSafe<T> = T;
 const DRAG_THRESHOLD: f64 = 2.;
 const DEFAULT_TOOLTIP_SHOW_DELAY: Duration = Duration::from_millis(500);
 const HOVERABLE_TOOLTIP_HIDE_DELAY: Duration = Duration::from_millis(500);
+/// Opacity of a touch-pressed clickable: a 15% black state layer on a black window.
+const TOUCH_PRESS_OPACITY: f32 = 0.85;
 
 /// The styling information for a given group.
 pub struct GroupStyle {
@@ -2466,7 +2468,14 @@ impl Interactivity {
                         style.overflow_mask(bounds, window.rem_size()),
                         |window| {
                             let hitbox = if self.should_insert_hitbox(&style, window, cx) {
-                                Some(window.insert_hitbox(bounds, self.hitbox_behavior))
+                                Some(
+                                    window.insert_hitbox_with_press(
+                                        bounds,
+                                        self.hitbox_behavior,
+                                        (!self.click_listeners.is_empty())
+                                            .then(|| window.current_view()),
+                                    ),
+                                )
                             } else {
                                 None
                             };
@@ -3206,6 +3215,7 @@ impl Interactivity {
                                 let mouse_click = ClickEvent::Mouse(MouseClickEvent {
                                     down: mouse_down,
                                     up: event.clone(),
+                                    bounds: hitbox.bounds,
                                 });
 
                                 match btn {
@@ -3462,22 +3472,17 @@ impl Interactivity {
                             .filter(&mut delta, event.touch_phase);
                     }
 
+                    // A wheel turns along whichever axis scrolls; a touch pan moves
+                    // only its own axis, so a cross-axis parent gets it instead.
+                    let cross_axis = !restrict_scroll_to_axis && !event.delta.precise();
                     let mut delta_x = match overflow.x {
                         Overflow::Scroll if !delta.x.is_zero() => delta.x,
-                        Overflow::Scroll
-                            if !restrict_scroll_to_axis && overflow.y != Overflow::Scroll =>
-                        {
-                            delta.y
-                        }
+                        Overflow::Scroll if cross_axis && overflow.y != Overflow::Scroll => delta.y,
                         _ => Pixels::ZERO,
                     };
                     let mut delta_y = match overflow.y {
                         Overflow::Scroll if !delta.y.is_zero() => delta.y,
-                        Overflow::Scroll
-                            if !restrict_scroll_to_axis && overflow.x != Overflow::Scroll =>
-                        {
-                            delta.x
-                        }
+                        Overflow::Scroll if cross_axis && overflow.x != Overflow::Scroll => delta.x,
                         _ => Pixels::ZERO,
                     };
                     if !allow_concurrent_scroll && !delta_x.is_zero() && !delta_y.is_zero() {
@@ -3494,9 +3499,12 @@ impl Interactivity {
                     ) {
                         return;
                     }
-                    scroll_offset.y += delta_y;
-                    scroll_offset.x += delta_x;
+                    scroll_offset.y = (scroll_offset.y + delta_y).clamp(-fast_scroll_max.y, px(0.));
+                    scroll_offset.x = (scroll_offset.x + delta_x).clamp(-fast_scroll_max.x, px(0.));
                     if *scroll_offset != old_scroll_offset {
+                        // Nested scrolling: what this container used is not offered
+                        // to its scrolling ancestors; at its bounds the event moves on.
+                        cx.stop_propagation();
                         crate::fast::retained::invalidate_retained_subtrees(window, &subtrees);
                         crate::fast::layers::invalidate::note_scrolled(window, &fast_container);
                         cx.notify(current_view);
@@ -3641,6 +3649,17 @@ impl Interactivity {
                 && clicked_state.element
             {
                 style.refine(active_style)
+            }
+        }
+
+        // Touch presses dim clickable elements like a black state layer.
+        // An explicit `active` style replaces the dimming; `.active(|s| s)` opts out.
+        if let Some(hitbox) = hitbox
+            && window.touch_pressed_hitbox == Some(hitbox.id)
+        {
+            match self.active_style.as_ref() {
+                Some(active_style) => style.refine(active_style),
+                None => style.opacity = Some(style.opacity.unwrap_or(1.) * TOUCH_PRESS_OPACITY),
             }
         }
 

@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 
 use crate::{
-    AtlasTextureId, AtlasTile, Bounds, LayerFrame, LayerKey, Point, PolychromeSprite, Quad,
-    ScaledPixels, Scene, TileCoord, TileId, Window, decode_layer_tile, point,
+    AtlasTextureId, AtlasTile, Backdrop, Bounds, LayerFrame, LayerKey, Point, PolychromeSprite,
+    Quad, ScaledPixels, Scene, TileCoord, TileId, Window, decode_layer_tile, point,
     scene::{PaintOperation, Primitive},
 };
 
@@ -36,6 +36,7 @@ fn drawing_sequence(scene: &Scene) -> Vec<Primitive> {
     gather!(subpixel_sprites, 5, SubpixelSprite);
     gather!(polychrome_sprites, 6, PolychromeSprite);
     gather!(surfaces, 7, Surface);
+    gather!(backdrops, 8, Backdrop);
     sequence.sort_by_key(|(key, _)| *key);
     sequence
         .into_iter()
@@ -65,6 +66,7 @@ fn clip_to(primitive: &mut Primitive, mask: &Bounds<ScaledPixels>) {
         Primitive::SubpixelSprite(p) => &mut p.content_mask,
         Primitive::PolychromeSprite(p) => &mut p.content_mask,
         Primitive::Surface(p) => &mut p.content_mask,
+        Primitive::Backdrop(p) => &mut p.content_mask,
     };
     content_mask.bounds = content_mask.bounds.intersect(mask);
 }
@@ -225,6 +227,7 @@ fn describe(primitive: &Primitive) -> String {
             }
         ),
         Primitive::Surface(p) => format!("surface {:?} {:?}", p.bounds, p.content_mask),
+        Primitive::Backdrop(p) => format!("{:?}", Backdrop { order: 0, ..*p }),
     }
 }
 

@@ -578,6 +578,19 @@ impl<T: 'static> Entity<T> {
         cx.read_entity(self, f)
     }
 
+    /// Updates the entity to draw part of it from another view, as a view
+    /// rendering a slice of its parent does. Unlike [`Self::update`], this is
+    /// not counted as changing what the entity holds unless it notifies, so the
+    /// views that read it are not built again for it.
+    #[inline]
+    pub fn update_for_draw<R>(
+        &self,
+        cx: &mut App,
+        draw: impl FnOnce(&mut T, &mut Context<T>) -> R,
+    ) -> R {
+        crate::fast::dependencies::query(self, cx, draw)
+    }
+
     /// Updates the entity referenced by this handle with the given function.
     #[inline]
     pub fn update<R, C: AppContext>(

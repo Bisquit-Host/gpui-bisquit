@@ -301,6 +301,13 @@ fn hash_primitive(primitive: &Primitive, tile: &Bounds<ScaledPixels>, hasher: &m
             hash_bounds(&surface.bounds, hasher);
             hash_mask(&surface.content_mask, tile, hasher);
         }
+        Primitive::Backdrop(backdrop) => {
+            // Content with a backdrop is drawn into the frame, never into
+            // tiles (`paint::repaint`), so it only needs to hash apart.
+            hasher.write_u8(8);
+            hash_bounds(&backdrop.bounds, hasher);
+            hash_mask(&backdrop.content_mask, tile, hasher);
+        }
     }
 }
 

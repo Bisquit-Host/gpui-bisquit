@@ -223,6 +223,9 @@ pub struct MouseClickEvent {
 
     /// The mouse event when the button was released.
     pub up: MouseUpEvent,
+
+    /// The bounds of the clicked element's hitbox.
+    pub bounds: Bounds<Pixels>,
 }
 
 /// The stage of a pressure click event.
@@ -330,6 +333,17 @@ impl ClickEvent {
             ClickEvent::Keyboard(event) => event.bounds.bottom_left(),
             ClickEvent::Mouse(event) => event.up.position,
             ClickEvent::Touch(event) => event.position,
+        }
+    }
+
+    /// Returns the bounds of the clicked element, for anchoring popups to it.
+    ///
+    /// `Touch`: An empty rectangle at the tap position.
+    pub fn bounds(&self) -> Bounds<Pixels> {
+        match self {
+            ClickEvent::Keyboard(event) => event.bounds,
+            ClickEvent::Mouse(event) => event.bounds,
+            ClickEvent::Touch(event) => Bounds::new(event.position, crate::Size::default()),
         }
     }
 

@@ -35,6 +35,9 @@ pub(crate) struct LayoutRetention {
     /// no key for them or because their key was already claimed. Released at
     /// the end of the frame, which is what used to happen to every node.
     transient: Vec<LayoutId>,
+    /// Every node in the tree, retained and transient. Taffy panics on a
+    /// node it has freed, and ids recorded in an earlier frame may name one.
+    live: FxHashSet<LayoutId>,
     /// Styles as the element requested them, for the few nodes whose style
     /// Taffy no longer holds verbatim because [`TaffyLayoutEngine::stretch_auto_size_to_fill`]
     /// rewrote it. Without this, every frame would compare an unstretched
@@ -492,13 +495,21 @@ impl TaffyLayoutEngine {
     /// Whether computing layout at `root` reaches `id`. Element ancestry
     /// does not imply layout ancestry: list items and other children placed
     /// with `prepaint_as_root` belong to separate Taffy trees.
+    /// The ids may be from an earlier frame and name nodes freed since, as
+    /// transient ones are; such a node reaches nothing.
     pub(crate) fn layout_reaches(&self, root: LayoutId, id: LayoutId) -> bool {
+        let live = &self.retention.live;
+        if !live.contains(&root) || !live.contains(&id) {
+            return false;
+        }
         let root = root.into();
         let mut node = id.into();
         loop {
             if node == root {
                 return true;
             }
+            // Taffy unlinks the children of a node it frees, so every
+            // ancestor of a live node is live.
             let Some(parent) = self.taffy.parent(node) else {
                 return false;
             };
@@ -568,6 +579,7 @@ impl TaffyLayoutEngine {
     /// is no key to record it under.
     fn retain(&mut self, key: Option<u64>, id: LayoutId, measured: bool, style_fingerprint: u64) {
         let retention = &mut self.retention;
+        retention.live.insert(id);
         let Some(key) = key else {
             retention.transient.push(id);
             return;
@@ -930,6 +942,7 @@ pub(crate) fn release_unclaimed_nodes(engine: &mut TaffyLayoutEngine) {
     retention.stats.frames += 1;
 
     for id in retention.transient.drain(..) {
+        retention.live.remove(&id);
         retention.unstretched_styles.remove(&id);
         if !retention.robbed_parents.is_empty() {
             retention.robbed_parents.remove(&id);
@@ -945,6 +958,7 @@ pub(crate) fn release_unclaimed_nodes(engine: &mut TaffyLayoutEngine) {
         let taffy = &mut engine.taffy;
         let unstretched_styles = &mut retention.unstretched_styles;
         let robbed_parents = &mut retention.robbed_parents;
+        let live = &mut retention.live;
         let freed = &mut retention.stats.nodes_freed;
         retention.retained.retain(|_, node| {
             if node.claimed_in_frame == frame
@@ -954,6 +968,7 @@ pub(crate) fn release_unclaimed_nodes(engine: &mut TaffyLayoutEngine) {
             }
             unstretched_styles.remove(&node.id);
             robbed_parents.remove(&node.id);
+            live.remove(&node.id);
             remove_node(taffy, node.id);
             *freed += 1;
             false
@@ -1411,6 +1426,17 @@ mod tests {
     use super::layout_fingerprint;
     use crate::px;
     use crate::{GridTemplate, Style, taffy::ToTaffy as _};
+
+    #[test]
+    fn a_removed_node_reaches_nothing() {
+        let mut engine = crate::taffy::TaffyLayoutEngine::new();
+        let child = engine.request_layout(None, Style::default(), px(16.), 1., &[]);
+        let root = engine.request_layout(None, Style::default(), px(16.), 1., &[child]);
+        assert!(engine.layout_reaches(root, child));
+        // Unclaimed nodes are released when the next frame begins.
+        engine.clear();
+        assert!(!engine.layout_reaches(root, child));
+    }
 
     /// Every field the conversion to a Taffy style reads has to reach the
     /// fingerprint too: a change the fingerprint cannot see is one a retained

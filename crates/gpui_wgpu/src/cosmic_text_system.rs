@@ -63,6 +63,7 @@ struct CosmicTextSystemState {
 
 struct LoadedFont {
     font: Arc<CosmicTextFont>,
+    letter_spacing: f32,
     features: CosmicFontFeatures,
     is_known_emoji_font: bool,
     /// resolved at load time so `layout_line` shares one chain across faces.
@@ -71,6 +72,7 @@ struct LoadedFont {
 }
 
 struct FontMatchProperties {
+    letter_spacing: f32,
     primary_family_name: SharedString,
     stretch: Stretch,
     style: Style,
@@ -80,8 +82,14 @@ struct FontMatchProperties {
 }
 
 impl FontMatchProperties {
-    fn attributes<'a>(&'a self, font_id: FontId, family_name: &'a str) -> Attrs<'a> {
+    fn attributes<'a>(
+        &'a self,
+        font_id: FontId,
+        family_name: &'a str,
+        font_size: f32,
+    ) -> Attrs<'a> {
         Attrs::new()
+            .letter_spacing(self.letter_spacing / font_size.max(1.))
             .metadata(font_id.0)
             .family(Family::Name(family_name))
             .stretch(self.stretch)
@@ -300,6 +308,11 @@ impl CosmicTextSystemState {
         };
 
         Some(FontMatchProperties {
+            letter_spacing: if face.monospaced {
+                0.
+            } else {
+                loaded_font.letter_spacing
+            },
             primary_family_name: first_family.0.clone().into(),
             stretch: face.stretch,
             style: face.style,
@@ -315,11 +328,11 @@ impl CosmicTextSystemState {
                 continue;
             };
             let primary_attributes =
-                properties.attributes(font_id, &properties.primary_family_name);
+                properties.attributes(font_id, &properties.primary_family_name, 16.);
             self.font_system.get_font_matches(&primary_attributes);
 
             for (fallback_id, fallback_name) in &*properties.fallback_chain {
-                let fallback_attributes = properties.attributes(*fallback_id, fallback_name);
+                let fallback_attributes = properties.attributes(*fallback_id, fallback_name, 16.);
                 self.font_system.get_font_matches(&fallback_attributes);
             }
         }
@@ -383,13 +396,33 @@ impl CosmicTextSystemState {
             _ => Arc::from(Vec::new()),
         };
 
-        let name = gpui::font_name_with_fallbacks(name, &self.system_font_fallback);
+        let name: Cow<'_, str> = Cow::Borrowed(gpui::font_name_with_fallbacks(
+            name,
+            &self.system_font_fallback,
+        ));
+        // Android's bundled fonts retain their real family names; fontdb does
+        // not resolve CSS generic names through the exact-family lookup below.
+        #[cfg(target_os = "android")]
+        let name = if matches!(name.as_ref(), "monospace" | ".ZedMono") {
+            self.font_system
+                .db()
+                .faces()
+                .filter(|face| face.monospaced)
+                .find_map(|face| {
+                    face.families
+                        .first()
+                        .map(|family| Cow::Owned(family.0.clone()))
+                })
+                .unwrap_or(name)
+        } else {
+            name
+        };
 
         let families = self
             .font_system
             .db()
             .faces()
-            .filter(|face| face.families.iter().any(|family| *name == family.0))
+            .filter(|face| face.families.iter().any(|family| name.as_ref() == family.0))
             .map(|face| (face.id, face.post_script_name.clone()))
             .collect::<SmallVec<[_; 4]>>();
 
@@ -412,29 +445,22 @@ impl CosmicTextSystemState {
                 .get_font(database_id, cosmic_text::Weight::NORMAL)
                 .context("Could not load font")?;
 
-            // HACK: To let the storybook run and render Windows caption icons. We should actually do better font fallback.
-            let allowed_bad_font_names = [
-                "SegoeFluentIcons", // NOTE: Segoe fluent icons postscript name is inconsistent
-                "Segoe Fluent Icons",
-            ];
-
-            // This only decides whether a face can be a primary font. The
-            // editor measures layout with the width of 'm' and would panic
-            // without it.
-            //
-            // Don't remove the face from the font database. Arabic, Devanagari
-            // and emoji fonts often have no Latin glyphs, and they are exactly
-            // what cosmic-text falls back to when the primary font lacks a
-            // glyph.
-            if font.as_swash().charmap().map('m') == 0
-                && !allowed_bad_font_names.contains(&postscript_name.as_str())
-            {
+            // Symbol and emoji faces can be requested directly without Latin
+            // coverage. Reject only empty faces, retaining them in the database
+            // for fallback, as upstream does.
+            let charmap = font.as_swash().charmap();
+            let mut has_glyph = charmap.map('m') != 0;
+            if !has_glyph {
+                charmap.enumerate(|_, glyph| has_glyph |= glyph != 0);
+            }
+            if !has_glyph {
                 continue;
             };
 
             let font_id = FontId(self.loaded_fonts.len());
             loaded_font_ids.push(font_id);
             self.loaded_fonts.push(LoadedFont {
+                letter_spacing: letter_spacing(features),
                 font,
                 features: cosmic_features.clone(),
                 is_known_emoji_font: check_is_known_emoji_font(&postscript_name),
@@ -527,7 +553,9 @@ impl CosmicTextSystemState {
             .swash_scale_context
             .builder(font_ref)
             .size(pixel_size * params.scale_factor)
-            .hint(true)
+            // Android draws text unhinted on phone-density screens, and running a
+            // font's hinting program is most of the cost of a glyph's first paint.
+            .hint(cfg!(not(target_os = "android")))
             .build();
 
         let sources: &[Source] = if params.is_emoji {
@@ -584,6 +612,7 @@ impl CosmicTextSystemState {
 
             let font_id = FontId(self.loaded_fonts.len());
             self.loaded_fonts.push(LoadedFont {
+                letter_spacing: 0.,
                 font,
                 features: CosmicFontFeatures::new(),
                 is_known_emoji_font: check_is_known_emoji_font(&face.post_script_name),
@@ -706,11 +735,17 @@ impl CosmicTextSystemState {
                 continue;
             };
 
-            let primary_attrs = properties.attributes(run.font_id, &properties.primary_family_name);
+            let primary_attrs = properties.attributes(
+                run.font_id,
+                &properties.primary_family_name,
+                font_size.into(),
+            );
             let fallback_attrs: SmallVec<[Attrs<'_>; 4]> = properties
                 .fallback_chain
                 .iter()
-                .map(|(font_id, family_name)| properties.attributes(*font_id, family_name))
+                .map(|(font_id, family_name)| {
+                    properties.attributes(*font_id, family_name, font_size.into())
+                })
                 .collect();
 
             let spans = if properties.fallback_chain.is_empty() {
@@ -1148,6 +1183,9 @@ fn charmap_covers(loaded_fonts: &[LoadedFont], id: FontId, ch: char) -> bool {
 fn cosmic_font_features(features: &FontFeatures) -> Result<CosmicFontFeatures> {
     let mut result = CosmicFontFeatures::new();
     for feature in features.0.iter() {
+        if feature.0 == "Bspc" {
+            continue;
+        }
         let name_bytes: [u8; 4] = feature
             .0
             .as_bytes()
@@ -1159,6 +1197,18 @@ fn cosmic_font_features(features: &FontFeatures) -> Result<CosmicFontFeatures> {
         result.set(tag, feature.1);
     }
     Ok(result)
+}
+
+// GPUI has no tracking field. Preserve spacing in its font/cache key using a
+// private feature, then let cosmic-text apply it to clusters, including fallbacks.
+fn letter_spacing(features: &FontFeatures) -> f32 {
+    features
+        .0
+        .iter()
+        .find(|(tag, _)| tag == "Bspc")
+        .map(|(_, bits)| f32::from_bits(*bits))
+        .filter(|spacing| spacing.is_finite() && spacing.abs() <= 16.)
+        .unwrap_or(0.)
 }
 
 #[cfg(feature = "font-kit")]

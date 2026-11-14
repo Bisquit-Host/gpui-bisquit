@@ -50,9 +50,12 @@ pub struct Scene {
     pub subpixel_sprites: Vec<SubpixelSprite>,
     pub polychrome_sprites: Vec<PolychromeSprite>,
     pub surfaces: Vec<PaintSurface>,
+    pub backdrops: Vec<Backdrop>,
     pub(crate) sort_scratch: crate::fast::scene::SortScratch,
     pub(crate) fast_rounded_clip: crate::fast::rounded_clip::SceneClips,
     pub layers: crate::fast::layers::scene::SceneLayers,
+    /// What [`crate::Window::with_vertical_stretch`] applies to primitives as they are inserted.
+    pub(crate) stretch: Option<crate::stretch::Stretch>,
 }
 
 #[expect(missing_docs)]
@@ -70,6 +73,7 @@ impl Scene {
         self.subpixel_sprites.clear();
         self.polychrome_sprites.clear();
         self.surfaces.clear();
+        self.backdrops.clear();
         crate::fast::layers::scene::SceneLayers::clear(&mut self.layers);
     }
 
@@ -78,6 +82,10 @@ impl Scene {
     }
 
     pub fn push_layer(&mut self, bounds: Bounds<ScaledPixels>) {
+        let bounds = match &self.stretch {
+            Some(stretch) => stretch.layer(bounds),
+            None => bounds,
+        };
         let order = self.primitive_bounds.insert(bounds);
         self.layer_stack.push(order);
         self.paint_operations
@@ -91,6 +99,9 @@ impl Scene {
 
     pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
         let mut primitive = primitive.into();
+        if let Some(stretch) = &self.stretch {
+            stretch.apply(&mut primitive);
+        }
         let clipped_bounds = primitive
             .bounds()
             .intersect(&primitive.content_mask().bounds);
@@ -138,6 +149,10 @@ impl Scene {
                 surface.order = order;
                 self.surfaces.push(surface.clone());
             }
+            Primitive::Backdrop(backdrop) => {
+                backdrop.order = order;
+                self.backdrops.push(*backdrop);
+            }
         }
         self.paint_operations
             .push(PaintOperation::Primitive(primitive));
@@ -145,6 +160,8 @@ impl Scene {
 
     pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
         crate::fast::layers::paint::replay_layers(self, range.clone(), prev_scene);
+        // Replayed operations were stretched when painted; see `crate::stretch`.
+        let stretch = self.stretch.take();
         for operation in &prev_scene.paint_operations[range] {
             match operation {
                 PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
@@ -155,6 +172,7 @@ impl Scene {
                 }
             }
         }
+        self.stretch = stretch;
     }
 
     pub fn finish(&mut self) {
@@ -186,6 +204,8 @@ impl Scene {
             polychrome_sprites_iter: self.polychrome_sprites.iter().peekable(),
             surfaces_start: 0,
             surfaces_iter: self.surfaces.iter().peekable(),
+            backdrops_start: 0,
+            backdrops_iter: self.backdrops.iter().peekable(),
         }
     }
 }
@@ -208,6 +228,7 @@ pub(crate) enum PrimitiveKind {
     SubpixelSprite,
     PolychromeSprite,
     Surface,
+    Backdrop,
 }
 
 pub(crate) enum PaintOperation {
@@ -228,6 +249,7 @@ pub enum Primitive {
     SubpixelSprite(SubpixelSprite),
     PolychromeSprite(PolychromeSprite),
     Surface(PaintSurface),
+    Backdrop(Backdrop),
 }
 
 #[expect(missing_docs)]
@@ -242,6 +264,7 @@ impl Primitive {
             Primitive::SubpixelSprite(sprite) => &sprite.bounds,
             Primitive::PolychromeSprite(sprite) => &sprite.bounds,
             Primitive::Surface(surface) => &surface.bounds,
+            Primitive::Backdrop(backdrop) => &backdrop.bounds,
         }
     }
 
@@ -255,6 +278,7 @@ impl Primitive {
             Primitive::SubpixelSprite(sprite) => &sprite.content_mask,
             Primitive::PolychromeSprite(sprite) => &sprite.content_mask,
             Primitive::Surface(surface) => &surface.content_mask,
+            Primitive::Backdrop(backdrop) => &backdrop.content_mask,
         }
     }
 }
@@ -283,13 +307,15 @@ struct BatchIterator<'a> {
     polychrome_sprites_iter: Peekable<slice::Iter<'a, PolychromeSprite>>,
     surfaces_start: usize,
     surfaces_iter: Peekable<slice::Iter<'a, PaintSurface>>,
+    backdrops_start: usize,
+    backdrops_iter: Peekable<slice::Iter<'a, Backdrop>>,
 }
 
 impl<'a> Iterator for BatchIterator<'a> {
     type Item = PrimitiveBatch;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let mut orders_and_kinds = [
+        let orders_and_kinds = [
             (
                 self.shadows_iter.peek().map(|s| s.order),
                 PrimitiveKind::Shadow,
@@ -316,11 +342,26 @@ impl<'a> Iterator for BatchIterator<'a> {
                 self.surfaces_iter.peek().map(|s| s.order),
                 PrimitiveKind::Surface,
             ),
+            (
+                self.backdrops_iter.peek().map(|b| b.order),
+                PrimitiveKind::Backdrop,
+            ),
         ];
-        orders_and_kinds.sort_by_key(|(order, kind)| (order.unwrap_or(u32::MAX), *kind));
-
-        let first = orders_and_kinds[0];
-        let second = orders_and_kinds[1];
+        let key =
+            |(order, kind): (Option<DrawOrder>, PrimitiveKind)| (order.unwrap_or(u32::MAX), kind);
+        let mut first = orders_and_kinds[0];
+        let mut second = orders_and_kinds[1];
+        if key(second) < key(first) {
+            std::mem::swap(&mut first, &mut second);
+        }
+        for candidate in &orders_and_kinds[2..] {
+            if key(*candidate) < key(first) {
+                second = first;
+                first = *candidate;
+            } else if key(*candidate) < key(second) {
+                second = *candidate;
+            }
+        }
         let (batch_kind, max_order_and_kind) = if first.0.is_some() {
             (first.1, (second.0.unwrap_or(u32::MAX), second.1))
         } else {
@@ -461,6 +502,20 @@ impl<'a> Iterator for BatchIterator<'a> {
                 self.surfaces_start = surfaces_end;
                 Some(PrimitiveBatch::Surfaces(surfaces_start..surfaces_end))
             }
+            PrimitiveKind::Backdrop => {
+                let backdrops_start = self.backdrops_start;
+                let mut backdrops_end = backdrops_start + 1;
+                self.backdrops_iter.next();
+                while self
+                    .backdrops_iter
+                    .next_if(|backdrop| (backdrop.order, batch_kind) < max_order_and_kind)
+                    .is_some()
+                {
+                    backdrops_end += 1;
+                }
+                self.backdrops_start = backdrops_end;
+                Some(PrimitiveBatch::Backdrops(backdrops_start..backdrops_end))
+            }
         }
     }
 }
@@ -493,6 +548,7 @@ pub enum PrimitiveBatch {
         range: Range<usize>,
     },
     Surfaces(Range<usize>),
+    Backdrops(Range<usize>),
 }
 
 impl PrimitiveBatch {
@@ -525,6 +581,7 @@ impl PrimitiveBatch {
                 )
             }
             Self::Surfaces(range) => format!("surfaces ({})", range.len()),
+            Self::Backdrops(range) => format!("backdrops ({})", range.len()),
         }
     }
 }
@@ -945,5 +1002,135 @@ impl PathVertex<Pixels> {
             st_position: self.st_position,
             content_mask: self.content_mask.scale(factor),
         }
+    }
+}
+
+/// What a backdrop primitive does with the pixels already drawn beneath it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BackdropKind {
+    /// Copies the pixels under the primitive's bounds into `effect.slot`.
+    Capture,
+    /// Redraws the pixels under `effect.shape` through blur, saturation and a lens.
+    #[default]
+    Glass,
+}
+
+/// Liquid-glass parameters mirroring Kyant's backdrop library. Lengths are in
+/// pixels when passed to `Window::paint_backdrop` and scaled pixels in a scene.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BackdropEffect {
+    /// The glass shape, a rounded rectangle with one corner radius.
+    pub shape: Bounds<ScaledPixels>,
+    /// A `graphicsLayer` scale about the shape's center. Effects are computed
+    /// at the unscaled shape and scaled with it, as Compose layers do; zero means 1.
+    pub layer_scale: [f32; 2],
+    /// Corner radius of the shape.
+    pub corner_radius: f32,
+    /// Slot read instead of the current target; 0 reads the current target.
+    pub source: u8,
+    /// Slot written by a capture, or restored outside the shape by a glass; 0 is none.
+    pub slot: u8,
+    /// Extra backdrop captured around the shape, as Kyant's effect padding.
+    pub padding: f32,
+    /// Android blur radius; converted to a gaussian sigma like Skia does.
+    pub blur_radius: f32,
+    /// Color saturation applied to the backdrop; 1 leaves it unchanged.
+    pub saturation: f32,
+    /// Distance from the edge over which the lens bends the backdrop.
+    pub refraction_height: f32,
+    /// How far the lens pulls the backdrop inward at the edge.
+    pub refraction_amount: f32,
+    /// Bends toward the center as well as the edge normal.
+    pub depth_effect: bool,
+    /// Splits the refracted backdrop into a seven-tap spectrum.
+    pub chromatic_aberration: bool,
+    /// Colors drawn over the backdrop inside the shape, bottom first, straight RGBA.
+    pub surface: [[f32; 4]; 2],
+    /// Additive radial glow over the surface: RGB and center alpha.
+    pub radial_glow: [f32; 4],
+    /// Alpha of the radial glow at the shape's edge.
+    pub radial_glow_edge: f32,
+    /// Element opacity applied to everything the glass draws; set by `paint_backdrop`.
+    pub opacity: f32,
+    /// Opacity of the rim highlight lit at 45 degrees.
+    pub highlight_alpha: f32,
+    /// Rim highlight stroke width.
+    pub highlight_width: f32,
+    /// Rim highlight blur radius.
+    pub highlight_blur: f32,
+    /// `HighlightStyle.Ambient`: lit white on one side and dark on the other,
+    /// blended normally, instead of `Default`'s additive white rim.
+    pub highlight_ambient: bool,
+    /// Touch glow progress and its position relative to the shape.
+    pub glow: f32,
+    /// Touch glow position relative to the shape.
+    pub glow_position: [f32; 2],
+    /// Outer shadow opacity, blur radius, vertical offset and color alpha.
+    pub shadow_alpha: f32,
+    #[allow(missing_docs)]
+    pub shadow_radius: f32,
+    #[allow(missing_docs)]
+    pub shadow_offset: f32,
+    #[allow(missing_docs)]
+    pub shadow_color_alpha: f32,
+    /// Inner shadow opacity, blur radius, vertical offset and color alpha.
+    pub inner_shadow_alpha: f32,
+    #[allow(missing_docs)]
+    pub inner_shadow_radius: f32,
+    #[allow(missing_docs)]
+    pub inner_shadow_offset: f32,
+    #[allow(missing_docs)]
+    pub inner_shadow_color_alpha: f32,
+    /// Draws the source scaled with the layer instead of glass over it; the
+    /// source content sits at `shape.origin + content_offset`, unscaled.
+    pub scale_content: bool,
+    #[allow(missing_docs)]
+    pub content_offset: [f32; 2],
+}
+
+impl BackdropEffect {
+    /// Scales every length by `factor`, leaving the shape untouched.
+    pub fn scale_lengths(mut self, factor: f32) -> Self {
+        self.corner_radius *= factor;
+        self.padding *= factor;
+        self.blur_radius *= factor;
+        self.refraction_height *= factor;
+        self.refraction_amount *= factor;
+        self.highlight_width *= factor;
+        self.highlight_blur *= factor;
+        self.glow_position = [
+            self.glow_position[0] * factor,
+            self.glow_position[1] * factor,
+        ];
+        self.content_offset = [
+            self.content_offset[0] * factor,
+            self.content_offset[1] * factor,
+        ];
+        self.shadow_radius *= factor;
+        self.shadow_offset *= factor;
+        self.inner_shadow_radius *= factor;
+        self.inner_shadow_offset *= factor;
+        self
+    }
+}
+
+/// A backdrop capture or glass draw.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Backdrop {
+    /// Stacking order assigned by the scene.
+    pub order: DrawOrder,
+    /// Capture or glass.
+    pub kind: BackdropKind,
+    /// The pixels captured, or the area a glass draws including its shadow.
+    pub bounds: Bounds<ScaledPixels>,
+    /// Clip applied to the glass.
+    pub content_mask: ContentMask<ScaledPixels>,
+    /// Glass parameters, or the capture slot.
+    pub effect: BackdropEffect,
+}
+
+impl From<Backdrop> for Primitive {
+    fn from(backdrop: Backdrop) -> Self {
+        Primitive::Backdrop(backdrop)
     }
 }

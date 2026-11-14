@@ -1,11 +1,18 @@
+mod backdrop;
 mod cosmic_text_system;
 mod fast;
+mod instance_texture;
+mod pipeline_cache;
+mod presenter;
 mod wgpu_atlas;
 mod wgpu_context;
 mod wgpu_renderer;
 
+#[doc(hidden)]
+pub use backdrop::backdrop_group_starts;
 pub use cosmic_text_system::*;
 pub use fast::dynamic_textures::WgpuDynamicTexture;
+pub use pipeline_cache::set_pipeline_cache_dir;
 pub use wgpu;
 pub use wgpu_atlas::*;
 pub use wgpu_context::*;

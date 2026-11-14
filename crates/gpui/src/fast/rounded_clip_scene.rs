@@ -38,16 +38,22 @@ pub(crate) fn compile(scene: &mut Scene) {
         scene.layers.frames = layers.clone();
         scene
     };
+    let holds_backdrop = scopes_holding_backdrops(&operations);
+    let mut begins = 0;
     let mut stack = vec![new_scene()];
     let mut shapes = Vec::new();
     let mut redundant = Vec::new();
     for operation in &operations {
         match operation {
             PaintOperation::FastRoundedClip(ClipOperation::Begin(shape)) => {
-                let already_active = shapes.contains(shape);
-                redundant.push(already_active);
+                // Glass reads the pixels drawn before it in the frame, which a
+                // clip group's own scene does not hold: a scope with a backdrop
+                // is drawn inline, clipped to its content mask as upstream does.
+                let inline = shapes.contains(shape) || holds_backdrop[begins];
+                begins += 1;
+                redundant.push(inline);
                 shapes.push(*shape);
-                if !already_active {
+                if !inline {
                     stack.push(new_scene());
                 }
             }
@@ -111,6 +117,31 @@ pub(crate) fn compile(scene: &mut Scene) {
     compiled.fast_rounded_clip.compiled = true;
     compiled.sort_scratch = mem::take(&mut scene.sort_scratch);
     *scene = compiled;
+}
+
+/// For each rounded clip scope, in the order the scopes begin, whether a
+/// backdrop is painted inside it, directly or in a scope nested in it.
+fn scopes_holding_backdrops(operations: &[PaintOperation]) -> Vec<bool> {
+    let mut holds = Vec::new();
+    let mut open = Vec::new();
+    for operation in operations {
+        match operation {
+            PaintOperation::FastRoundedClip(ClipOperation::Begin(_)) => {
+                open.push(holds.len());
+                holds.push(false);
+            }
+            PaintOperation::FastRoundedClip(ClipOperation::End) => {
+                open.pop();
+            }
+            PaintOperation::Primitive(crate::scene::Primitive::Backdrop(_)) => {
+                for &scope in &open {
+                    holds[scope] = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    holds
 }
 
 fn geometry(shape: Shape) -> LayerFrame {

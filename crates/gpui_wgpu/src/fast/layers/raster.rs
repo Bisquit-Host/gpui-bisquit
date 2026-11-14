@@ -83,6 +83,7 @@ pub(crate) fn rasterize(
             view,
             clear: Some(clear_color(layer.background)),
             label: "layer_tile_pass",
+            backdrops: false,
             globals: &globals.globals,
             path_targets: PathTargets {
                 globals: &globals.path_globals,

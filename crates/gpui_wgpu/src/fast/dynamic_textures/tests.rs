@@ -93,6 +93,7 @@ fn draw_other(
     core.render_frame(
         scene,
         &target.create_view(&Default::default()),
+        None,
         size(DevicePixels(side as i32), DevicePixels(side as i32)),
         false,
         wgpu::Color::BLACK,

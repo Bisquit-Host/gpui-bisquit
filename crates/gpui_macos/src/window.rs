@@ -74,6 +74,8 @@ use std::{
 };
 
 pub(crate) const WINDOW_STATE_IVAR: &CStr = c"windowState";
+/// How long a fully occluded window keeps its layer and GPU textures.
+const GPU_RESOURCE_RELEASE_DELAY: Duration = Duration::from_secs(2);
 
 static RESTORES_WORKSPACE_AT_LAUNCH_DEFAULT: Once = Once::new();
 
@@ -433,6 +435,10 @@ unsafe fn build_window_class(name: &CStr, superclass: &AnyClass) -> *const AnyCl
             window_did_change_occlusion_state as extern "C" fn(_, Sel, *mut AnyObject),
         );
         decl.add_method(
+            sel!(windowDidDeminiaturize:),
+            window_did_deminiaturize as extern "C" fn(_, Sel, *mut AnyObject),
+        );
+        decl.add_method(
             sel!(windowWillEnterFullScreen:),
             window_will_enter_fullscreen as extern "C" fn(_, Sel, *mut AnyObject),
         );
@@ -470,6 +476,10 @@ unsafe fn build_window_class(name: &CStr, superclass: &AnyClass) -> *const AnyCl
         );
 
         decl.add_method(sel!(close), close_window as extern "C" fn(_, Sel));
+        decl.add_method(
+            sel!(deminiaturize:),
+            deminiaturize_window as extern "C" fn(_, Sel, *mut AnyObject),
+        );
 
         decl.add_method(
             sel!(draggingEntered:),
@@ -662,6 +672,10 @@ pub(crate) struct MacWindowState {
     cursor_visible: Arc<AtomicBool>,
     frame_source: FrameSource,
     pub(crate) renderer: renderer::Renderer,
+    /// Bumped on every occlusion change so a stale delayed release is ignored.
+    occlusion_generation: u64,
+    /// The next frame must repaint everything, because GPU resources were released.
+    pending_force_render: bool,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     pub(crate) event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
     activate_callback: Option<Box<dyn FnMut(bool)>>,
@@ -1131,6 +1145,8 @@ impl MacWindow {
                     None => FrameSource::DisplayLink(None),
                 },
                 renderer,
+                occlusion_generation: 0,
+                pending_force_render: false,
                 request_frame_callback: None,
                 event_callback: None,
                 activate_callback: None,
@@ -3037,6 +3053,130 @@ pub(crate) extern "C" fn handle_view_event(this: &AnyObject, _: Sel, native_even
     }
 }
 
+fn merge_pending_frame_options(
+    mut options: RequestFrameOptions,
+    pending_force_render: &mut bool,
+) -> RequestFrameOptions {
+    if *pending_force_render {
+        options.require_presentation = true;
+        options.force_render = true;
+        *pending_force_render = false;
+    }
+    options
+}
+
+/// Invokes GPUI without holding the native-window lock. A synchronous request
+/// presents inside the current Core Animation transaction, detaching the
+/// display link meanwhile. Forced redraw state is consumed only when a frame
+/// can actually run.
+fn request_frame_outside_lock(
+    window_state: &Rc<Mutex<MacWindowState>>,
+    options: RequestFrameOptions,
+    synchronous_presentation: bool,
+) -> bool {
+    let (mut callback, options) = {
+        let mut lock = window_state.lock();
+        if lock.renderer.gpu_resources_released() {
+            return false;
+        }
+        let Some(callback) = lock.request_frame_callback.take() else {
+            return false;
+        };
+        let options = merge_pending_frame_options(options, &mut lock.pending_force_render);
+        if synchronous_presentation {
+            crate::fast::composition::set_presents_with_transaction(&mut lock, true);
+            lock.stop_display_link();
+        }
+        (callback, options)
+    };
+
+    callback(options);
+
+    let mut lock = window_state.lock();
+    lock.request_frame_callback = Some(callback);
+    if synchronous_presentation {
+        crate::fast::composition::set_presents_with_transaction(&mut lock, false);
+        lock.start_display_link(window_state);
+    }
+    true
+}
+
+fn install_view_layer(native_view: NonNull<AnyObject>, layer: *mut AnyObject) {
+    unsafe {
+        let _: () = msg_send![native_view.as_ptr(), setLayer: layer];
+        let _: () = msg_send![layer, setDelegate: native_view.as_ptr()];
+        let _: () = msg_send![
+            native_view.as_ptr(),
+            setLayerContentsRedrawPolicy: NSViewLayerContentsRedrawPolicy::DuringViewResize
+        ];
+        let _: () = msg_send![native_view.as_ptr(), setNeedsDisplay: Bool::YES];
+    }
+}
+
+/// Recreates a released layer and installs it before the window shows.
+fn prepare_window_for_visibility(window_state: &Rc<Mutex<MacWindowState>>) -> bool {
+    let (native_view, layer) = {
+        let mut lock = window_state.lock();
+        lock.occlusion_generation = lock.occlusion_generation.wrapping_add(1);
+        if !lock.renderer.restore_gpu_resources() {
+            return false;
+        }
+        lock.pending_force_render = true;
+        (
+            lock.native_view,
+            lock.renderer.layer_ptr().cast::<AnyObject>(),
+        )
+    };
+    install_view_layer(native_view, layer);
+    true
+}
+
+fn request_pending_window_frame(window_state: &Rc<Mutex<MacWindowState>>) {
+    let should_request_frame = {
+        let lock = window_state.lock();
+        lock.pending_force_render && !lock.renderer.gpu_resources_released()
+    };
+    if should_request_frame {
+        request_frame_outside_lock(window_state, Default::default(), true);
+    }
+}
+
+/// Swaps a still-occluded window's Metal layer for a plain one and drops its
+/// GPU textures. Visibility changes in the meantime cancel the release.
+fn release_window_gpu_resources(window_state: &Rc<Mutex<MacWindowState>>, generation: u64) {
+    let native_view = {
+        let lock = window_state.lock();
+        if lock.closed.load(Ordering::Acquire)
+            || lock.occlusion_generation != generation
+            || lock.renderer.gpu_resources_released()
+            || lock
+                .native_window()
+                .occlusionState()
+                .contains(NSWindowOcclusionState::Visible)
+        {
+            return;
+        }
+        lock.native_view
+    };
+
+    let placeholder = objc2_quartz_core::CALayer::new();
+    install_view_layer(
+        native_view,
+        Retained::as_ptr(&placeholder).cast_mut().cast(),
+    );
+
+    let mut lock = window_state.lock();
+    if lock.closed.load(Ordering::Acquire) || lock.occlusion_generation != generation {
+        let layer = lock.renderer.layer_ptr().cast::<AnyObject>();
+        drop(lock);
+        install_view_layer(native_view, layer);
+        return;
+    }
+    if lock.renderer.release_gpu_resources() {
+        lock.pending_force_render = true;
+    }
+}
+
 fn visibility(state: &MacWindowState) -> WindowVisibility {
     let is_visible = state
         .native_window()
@@ -3090,14 +3230,36 @@ extern "C" fn window_did_change_occlusion_state(this: &AnyObject, _: Sel, _: *mu
         .contains(NSWindowOcclusionState::Visible)
     {
         lock.move_traffic_light();
-        lock.start_display_link(&window_state);
+        drop(lock);
+        // The display link drives the renderer's layer, so restore it first.
+        prepare_window_for_visibility(&window_state);
+        window_state.lock().start_display_link(&window_state);
     } else {
         lock.stop_display_link();
+        lock.occlusion_generation = lock.occlusion_generation.wrapping_add(1);
+        let generation = lock.occlusion_generation;
+        let executor = lock.foreground_executor.clone();
+        let delay = lock.background_executor.timer(GPU_RESOURCE_RELEASE_DELAY);
+        drop(lock);
+        let weak_window_state = Rc::downgrade(&window_state);
+        executor
+            .spawn(async move {
+                delay.await;
+                if let Some(window_state) = weak_window_state.upgrade() {
+                    release_window_gpu_resources(&window_state, generation);
+                }
+            })
+            .detach();
     }
-    drop(lock);
     // The only visibility source: AppKit posts this for covering, minimizing,
     // hiding, Space switches, and display sleep alike.
     report_visibility(&window_state);
+}
+
+extern "C" fn window_did_deminiaturize(this: &AnyObject, _: Sel, _: *mut AnyObject) {
+    let window_state = unsafe { get_window_state(this) };
+    prepare_window_for_visibility(&window_state);
+    request_pending_window_frame(&window_state);
 }
 
 extern "C" fn window_did_resize(this: &AnyObject, _: Sel, _: *mut AnyObject) {
@@ -3195,16 +3357,7 @@ fn update_window_scale_factor(window_state: &Rc<Mutex<MacWindowState>>) {
     let scale_factor = lock.scale_factor();
     let size = lock.content_size();
     let drawable_size = size.to_device_pixels(scale_factor);
-    let layer = lock.renderer.layer_ptr().cast::<AnyObject>();
-    if !layer.is_null() {
-        unsafe {
-            let _: () = msg_send![
-                layer,
-                setContentsScale: scale_factor as f64
-            ];
-        }
-    }
-
+    lock.renderer.update_contents_scale(scale_factor as f64);
     lock.renderer.update_drawable_size(drawable_size);
     crate::fast::composition::scale_factor_changed(&mut lock, scale_factor, drawable_size);
 
@@ -3292,26 +3445,23 @@ extern "C" fn window_did_change_key_status(this: &AnyObject, selector: Sel, _: *
     // the first mouse click, causing keybindings to be non-functional.
     if selector == sel!(windowDidBecomeKey:) && is_active {
         let window_state = unsafe { get_window_state(this) };
-        let mut lock = window_state.lock();
-
-        if lock.activated_least_once {
-            if let Some(mut callback) = lock.request_frame_callback.take() {
-                crate::fast::composition::set_presents_with_transaction(&mut lock, true);
-                lock.stop_display_link();
-                drop(lock);
-                callback(RequestFrameOptions {
+        prepare_window_for_visibility(&window_state);
+        let should_request_frame = {
+            let mut lock = window_state.lock();
+            let activated_least_once = lock.activated_least_once;
+            lock.activated_least_once = true;
+            activated_least_once || lock.pending_force_render
+        };
+        if should_request_frame {
+            request_frame_outside_lock(
+                &window_state,
+                RequestFrameOptions {
                     signal_at,
                     signal_source: FrameRequestSource::NativeCallback,
                     ..Default::default()
-                });
-
-                let mut lock = window_state.lock();
-                lock.request_frame_callback = Some(callback);
-                crate::fast::composition::set_presents_with_transaction(&mut lock, false);
-                lock.start_display_link(&window_state);
-            }
-        } else {
-            lock.activated_least_once = true;
+                },
+                true,
+            );
         }
     }
 
@@ -3368,6 +3518,15 @@ extern "C" fn close_window(this: &AnyObject, _: Sel) {
     }
 }
 
+extern "C" fn deminiaturize_window(this: &AnyObject, _: Sel, sender: *mut AnyObject) {
+    let window_state = unsafe { get_window_state(this) };
+    prepare_window_for_visibility(&window_state);
+    unsafe {
+        let _: () = msg_send![super(this, class!(NSWindow)), deminiaturize: sender];
+    }
+    request_pending_window_frame(&window_state);
+}
+
 extern "C" fn make_backing_layer(this: &AnyObject, _: Sel) -> *mut AnyObject {
     let window_state = unsafe { get_window_state(this) };
     let window_state = window_state.as_ref().lock();
@@ -3421,46 +3580,37 @@ extern "C" fn set_frame_size(this: &AnyObject, _: Sel, size: NSSize) {
 extern "C" fn display_layer(this: &AnyObject, _: Sel, _: *mut AnyObject) {
     let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
     let window_state = unsafe { get_window_state(this) };
-    let mut lock = window_state.lock();
-    if let Some(mut callback) = lock.request_frame_callback.take() {
-        crate::fast::composition::set_presents_with_transaction(&mut lock, true);
-        lock.stop_display_link();
-        drop(lock);
-        callback(RequestFrameOptions {
+    request_frame_outside_lock(
+        &window_state,
+        RequestFrameOptions {
             signal_at,
             signal_source: FrameRequestSource::NativeCallback,
             ..Default::default()
-        });
-
-        let mut lock = window_state.lock();
-        lock.request_frame_callback = Some(callback);
-        crate::fast::composition::set_presents_with_transaction(&mut lock, false);
-        lock.start_display_link(&window_state);
-    }
+        },
+        true,
+    );
 }
 
 extern "C" fn step(view: *mut c_void) {
     let view = view as *mut AnyObject;
     let window_state = unsafe { get_window_state(&*view) };
-    let mut lock = window_state.lock();
-
-    if let Some(mut callback) = lock.request_frame_callback.take() {
-        let signal = match &lock.frame_source {
-            FrameSource::DisplayLink(Some(frame_source)) => frame_source.take_signal(),
-            _ => None,
-        };
-        let (signal_at, signal_source) = signal.map_or(
-            (None, FrameRequestSource::NativeCallback),
-            |(at, source)| (Some(at), source),
-        );
-        drop(lock);
-        callback(RequestFrameOptions {
+    let signal = match &window_state.lock().frame_source {
+        FrameSource::DisplayLink(Some(frame_source)) => frame_source.take_signal(),
+        _ => None,
+    };
+    let (signal_at, signal_source) = signal.map_or(
+        (None, FrameRequestSource::NativeCallback),
+        |(at, source)| (Some(at), source),
+    );
+    request_frame_outside_lock(
+        &window_state,
+        RequestFrameOptions {
             signal_at,
             signal_source,
             ..Default::default()
-        });
-        window_state.lock().request_frame_callback = Some(callback);
-    }
+        },
+        false,
+    );
 }
 
 fn metal_frame(
@@ -3473,17 +3623,24 @@ fn metal_frame(
         return;
     };
     let metal_frames = metal_frames.clone();
+    if lock.renderer.gpu_resources_released() {
+        return;
+    }
     let Some(mut callback) = lock.request_frame_callback.take() else {
         return;
     };
+    let options = merge_pending_frame_options(
+        RequestFrameOptions {
+            signal_at,
+            signal_source: FrameRequestSource::NativeCallback,
+            ..Default::default()
+        },
+        &mut lock.pending_force_render,
+    );
     lock.renderer.set_frame_drawable(Some(update.drawable()));
     drop(lock);
     metal_frames.begin_frame();
-    callback(RequestFrameOptions {
-        signal_at,
-        signal_source: FrameRequestSource::NativeCallback,
-        ..Default::default()
-    });
+    callback(options);
     let mut lock = window_state.lock();
     lock.request_frame_callback = Some(callback);
     // A frame with nothing to draw leaves its drawable unused; releasing it
@@ -4178,5 +4335,20 @@ mod tests {
                 .expect("test screen description ivar")
                 .load::<*mut AnyObject>(screen)
         }
+    }
+
+    #[test]
+    fn pending_force_render_is_consumed_once() {
+        let mut pending_force_render = true;
+
+        let forced =
+            merge_pending_frame_options(RequestFrameOptions::default(), &mut pending_force_render);
+        assert!(forced.force_render);
+        assert!(forced.require_presentation);
+        assert!(!pending_force_render);
+
+        let ordinary =
+            merge_pending_frame_options(RequestFrameOptions::default(), &mut pending_force_render);
+        assert_eq!(ordinary, RequestFrameOptions::default());
     }
 }

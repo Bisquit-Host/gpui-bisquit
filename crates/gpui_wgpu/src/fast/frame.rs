@@ -63,6 +63,10 @@ pub(crate) struct FrameState {
     pub(crate) bind_groups: BindGroupCache,
     pub(crate) globals: UploadedGlobals,
     pub(crate) layers: TileCache,
+    /// Liquid glass, drawn into the frame's own scene only (see `crate::backdrop`).
+    pub(crate) backdrops: std::cell::RefCell<Option<crate::backdrop::BackdropRenderer>>,
+    /// Where a frame drawn offscreen for its backdrops is copied when finished.
+    pub(crate) backdrop_blit: Option<wgpu::TextureView>,
     vertices: Vec<PathRasterizationVertex>,
     sprites: Vec<PathSprite>,
     path_batches: Vec<PathBatch>,
@@ -631,6 +635,7 @@ fn record(
             view: frame_view,
             clear: Some(clear),
             label: "main_pass",
+            backdrops: true,
             globals: target.globals_bind_group,
             path_targets: PathTargets {
                 globals: target.path_globals_bind_group,
@@ -652,6 +657,9 @@ pub(crate) struct SceneDraw<'a> {
     pub(crate) view: &'a wgpu::TextureView,
     pub(crate) clear: Option<wgpu::Color>,
     pub(crate) label: &'a str,
+    /// Whether the scene draws its backdrops: the frame's own scene does,
+    /// layer tiles leave theirs out.
+    pub(crate) backdrops: bool,
     /// The globals the scene's primitives are drawn with.
     pub(crate) globals: &'a wgpu::BindGroup,
     pub(crate) path_targets: PathTargets<'a>,
@@ -812,9 +820,22 @@ pub(crate) fn draw_scene(
         )
         .then_some(step.path_key())
     });
-    let mut pass = begin_main_pass(encoder, draw.view, draw.label, draw.clear);
+    let mut backdrops = draw
+        .backdrops
+        .then(|| state.backdrops.borrow_mut())
+        .filter(|renderer| renderer.is_some() && !draw.scene.backdrops.is_empty());
+    if let Some(renderer) = backdrops.as_mut().and_then(|renderer| renderer.as_mut()) {
+        let batches: Vec<_> = draw.scene.batches().collect();
+        renderer.plan(draw.scene, &batches);
+    }
+    let background = draw
+        .clear
+        .and(steps.first())
+        .filter(|step| step.clip.is_none())
+        .and_then(|step| background_clear(step.scene, &step.batch, draw.view.texture().size()));
+    let mut pass = begin_main_pass(encoder, draw.view, draw.label, background.or(draw.clear));
     let mut bound = PassState::default();
-    for step in steps {
+    for (step_index, step) in steps.into_iter().enumerate() {
         let path_key = step.path_key();
         let upload = step.upload;
         let scene = step.scene;
@@ -824,20 +845,40 @@ pub(crate) fn draw_scene(
         pass.set_bind_group(3, clip_binding, &[clip_offset]);
         let batch = step.batch;
         match batch {
-            PrimitiveBatch::Quads(range) => draw_batch(
-                &mut pass,
-                &mut bound,
-                draw.globals,
-                &pipelines.quads,
-                &upload.quads,
-                None,
-                range,
-            ),
+            PrimitiveBatch::Quads(mut range) => {
+                if background.is_some() && step_index == 0 {
+                    range.start += 1;
+                }
+                // Consecutive runs keep the drawing order.
+                while !range.is_empty() {
+                    let simple = is_simple_quad(&scene.quads[range.start]);
+                    let end = (range.start + 1..range.end)
+                        .find(|&index| is_simple_quad(&scene.quads[index]) != simple)
+                        .unwrap_or(range.end);
+                    let (pipeline, vertices) = if simple {
+                        (pipelines.simple_quads(), 10)
+                    } else {
+                        (pipelines.quads(), 4)
+                    };
+                    draw_batch(
+                        &mut pass,
+                        &mut bound,
+                        draw.globals,
+                        pipeline,
+                        vertices,
+                        &upload.quads,
+                        None,
+                        range.start..end,
+                    );
+                    range.start = end;
+                }
+            }
             PrimitiveBatch::Shadows(range) => draw_batch(
                 &mut pass,
                 &mut bound,
                 draw.globals,
-                &pipelines.shadows,
+                pipelines.shadows(),
+                4,
                 &upload.shadows,
                 None,
                 range,
@@ -869,7 +910,7 @@ pub(crate) fn draw_scene(
                 let Some(intermediate) = &intermediate else {
                     continue;
                 };
-                bound.set_pipeline(&mut pass, &pipelines.paths);
+                bound.set_pipeline(&mut pass, pipelines.paths());
                 bound.set_bind_group(&mut pass, 0, draw.globals);
                 bound.set_bind_group(&mut pass, 1, &draw.paths.sprites.group);
                 bound.set_bind_group(&mut pass, 2, intermediate);
@@ -883,7 +924,8 @@ pub(crate) fn draw_scene(
                 &mut pass,
                 &mut bound,
                 draw.globals,
-                &pipelines.underlines,
+                pipelines.underlines(),
+                4,
                 &upload.underlines,
                 None,
                 range,
@@ -897,7 +939,8 @@ pub(crate) fn draw_scene(
                     &mut pass,
                     &mut bound,
                     draw.globals,
-                    &pipelines.mono_sprites,
+                    pipelines.mono_sprites(),
+                    4,
                     &upload.monochrome_sprites,
                     Some(&texture),
                     range,
@@ -912,10 +955,8 @@ pub(crate) fn draw_scene(
                     &mut pass,
                     &mut bound,
                     draw.globals,
-                    pipelines
-                        .subpixel_sprites
-                        .as_ref()
-                        .unwrap_or(&pipelines.mono_sprites),
+                    pipelines.subpixel_sprites(),
+                    4,
                     &upload.subpixel_sprites,
                     Some(&texture),
                     range,
@@ -937,7 +978,8 @@ pub(crate) fn draw_scene(
                         &mut pass,
                         &mut bound,
                         draw.globals,
-                        &pipelines.poly_sprites,
+                        pipelines.poly_sprites(),
+                        4,
                         &upload.polychrome_sprites,
                         Some(&texture_bind_group("layer_tile_bind_group", view)),
                         run,
@@ -953,7 +995,8 @@ pub(crate) fn draw_scene(
                     &mut pass,
                     &mut bound,
                     draw.globals,
-                    &pipelines.poly_sprites,
+                    pipelines.poly_sprites(),
+                    4,
                     &upload.polychrome_sprites,
                     Some(&texture),
                     range,
@@ -962,9 +1005,36 @@ pub(crate) fn draw_scene(
             // Surfaces are macOS-only for video playback and are not
             // implemented by the WGPU renderer.
             PrimitiveBatch::Surfaces(_surfaces) => {}
+            PrimitiveBatch::Backdrops(range) => {
+                let Some(renderer) = backdrops.as_mut().and_then(|renderer| renderer.as_mut())
+                else {
+                    continue;
+                };
+                if !std::ptr::eq(scene, draw.scene) {
+                    continue;
+                }
+                for index in range {
+                    if let Some(group) = renderer.group_at(index, scene.backdrops.len()) {
+                        drop(pass);
+                        let first = group.start;
+                        renderer.prepare(target.device, encoder, &scene.backdrops[group], first);
+                        pass =
+                            begin_main_pass(encoder, draw.view, "main_pass_after_backdrop", None);
+                    }
+                    renderer.draw_glass(&mut pass, index);
+                    // Glass binds its own pipeline and bind group.
+                    bound.forget();
+                }
+            }
         }
     }
     drop(pass);
+    if let Some(renderer) = backdrops.as_mut().and_then(|renderer| renderer.as_mut()) {
+        if let Some(blit_to) = &state.backdrop_blit {
+            renderer.blit(target.device, encoder, blit_to);
+        }
+        renderer.flush_uniforms(target.queue);
+    }
 }
 
 /// The bind group of an atlas texture, or `None` once the atlas has released
@@ -1023,11 +1093,13 @@ fn begin_main_pass<'a>(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_batch(
     pass: &mut wgpu::RenderPass<'_>,
     state: &mut PassState,
     globals: &wgpu::BindGroup,
     pipeline: &wgpu::RenderPipeline,
+    vertices: u32,
     instances: &InstanceBinding,
     texture: Option<&wgpu::BindGroup>,
     range: Range<usize>,
@@ -1042,7 +1114,7 @@ fn draw_batch(
         state.set_bind_group(pass, 2, texture);
     }
     pass.draw(
-        0..4,
+        0..vertices,
         (instances.first + range.start as u32)..(instances.first + range.end as u32),
     );
 }
@@ -1093,7 +1165,7 @@ fn rasterize_group(
         depth_stencil_attachment: None,
         ..Default::default()
     });
-    pass.set_pipeline(&target.pipelines.path_rasterization);
+    pass.set_pipeline(target.pipelines.path_rasterization());
     pass.set_bind_group(0, targets.globals, &[]);
     pass.set_bind_group(1, &paths.vertices.group, &[]);
     pass.set_bind_group(
@@ -1101,11 +1173,82 @@ fn rasterize_group(
         &target.bind_group_layouts.fast_rounded_clip.unmasked,
         &[0],
     );
-    pass.draw(
-        (paths.vertices.first + vertices.start)..(paths.vertices.first + vertices.end),
-        0..1,
-    );
+    // The shader adds the instance index to the vertex index: GL backends
+    // leave a draw's first vertex out of `vertex_index`.
+    let base = paths.vertices.first + vertices.start;
+    pass.draw(0..vertices.end - vertices.start, base..base + 1);
     true
+}
+
+/// Quads `vs_quad_simple` and `fs_quad_simple` draw as `fs_quad` would.
+fn is_simple_quad(quad: &gpui::Quad) -> bool {
+    let radii = quad.corner_radii;
+    let widths = quad.border_widths;
+    radii.top_left == radii.top_right
+        && radii.top_left == radii.bottom_right
+        && radii.top_left == radii.bottom_left
+        && widths.top == widths.right
+        && widths.top == widths.bottom
+        && widths.top == widths.left
+        && (widths.top.0 == 0.0 || quad.border_style == gpui::BorderStyle::Solid)
+        && quad.background.as_solid().is_some()
+}
+
+/// The color of an opaque, square, borderless quad that is drawn first and
+/// covers the whole target. Clearing to it is free, while drawing it blends
+/// every pixel; on tilers that skip binning for few draws that is a full
+/// read and write of the frame in memory.
+fn background_clear(
+    scene: &Scene,
+    first: &PrimitiveBatch,
+    target: wgpu::Extent3d,
+) -> Option<wgpu::Color> {
+    let quad = scene.quads.first()?;
+    if !matches!(first, PrimitiveBatch::Quads(range) if range.start == 0 && !range.is_empty()) {
+        return None;
+    }
+    let color = quad.background.as_solid()?;
+    let covers = |bounds: Bounds<ScaledPixels>| {
+        bounds.origin.x.0 <= 0.0
+            && bounds.origin.y.0 <= 0.0
+            && bounds.origin.x.0 + bounds.size.width.0 >= target.width as f32
+            && bounds.origin.y.0 + bounds.size.height.0 >= target.height as f32
+    };
+    let square = quad.corner_radii.top_left.0 == 0.0
+        && quad.corner_radii.top_right.0 == 0.0
+        && quad.corner_radii.bottom_right.0 == 0.0
+        && quad.corner_radii.bottom_left.0 == 0.0;
+    let borderless = quad.border_widths.top.0 == 0.0
+        && quad.border_widths.right.0 == 0.0
+        && quad.border_widths.bottom.0 == 0.0
+        && quad.border_widths.left.0 == 0.0;
+    if color.a < 1.0
+        || !square
+        || !borderless
+        || !covers(quad.bounds)
+        || !covers(quad.content_mask.bounds)
+    {
+        return None;
+    }
+    // The quad shader's `hsla_to_rgba`, so the clear matches the drawn quad.
+    let h = color.h * 6.0;
+    let c = (1.0 - (2.0 * color.l - 1.0).abs()) * color.s;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let m = color.l - c / 2.0;
+    let (r, g, b) = match h {
+        h if (0.0..1.0).contains(&h) => (c, x, 0.0),
+        h if (1.0..2.0).contains(&h) => (x, c, 0.0),
+        h if (2.0..3.0).contains(&h) => (0.0, c, x),
+        h if (3.0..4.0).contains(&h) => (0.0, x, c),
+        h if (4.0..5.0).contains(&h) => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    Some(wgpu::Color {
+        r: f64::from(r + m),
+        g: f64::from(g + m),
+        b: f64::from(b + m),
+        a: 1.0,
+    })
 }
 
 #[cfg(all(test, feature = "test-support", not(target_family = "wasm")))]

@@ -108,6 +108,7 @@ impl LayerInput {
                 .intersect(&viewport),
             },
             behavior: hitbox.behavior,
+            pressable: hitbox.pressable,
         })
     }
 }

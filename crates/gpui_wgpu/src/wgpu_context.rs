@@ -20,6 +20,7 @@ pub struct WgpuContext {
     dual_source_blending: bool,
     color_texture_format: wgpu::TextureFormat,
     errors: Arc<DeviceErrorState>,
+    pub(crate) pipeline_cache: Option<Arc<crate::pipeline_cache::DiskPipelineCache>>,
 }
 
 /// Errors reported by wgpu's device-wide callbacks.
@@ -148,6 +149,35 @@ impl WgpuContext {
         compositor_gpu: Option<CompositorGpuHint>,
     ) -> anyhow::Result<Self> {
         Self::new_with_options(instance, surface, config, compositor_gpu, true)
+    }
+
+    /// Creates a context before any window exists, so that device creation can
+    /// overlap with the platform creating the first surface. Only for platforms
+    /// with a single display GPU: `WgpuRenderer::new` reuses this context and
+    /// checks it against the surface once one arrives.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn new_without_surface(instance: wgpu::Instance) -> anyhow::Result<Self> {
+        let mut adapters = gpui::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
+        Self::sort_adapters(&mut adapters, Self::device_id_filter(), None);
+        for adapter in adapters {
+            match gpui::block_on(Self::create_device(&adapter)) {
+                Ok((device, queue, dual_source_blending, color_texture_format)) => {
+                    return Ok(Self::from_native_adapter_and_device(
+                        instance,
+                        adapter,
+                        device,
+                        queue,
+                        dual_source_blending,
+                        color_texture_format,
+                    ));
+                }
+                Err(error) => log::warn!(
+                    "Failed to create a device for adapter {:?}: {error:#}",
+                    adapter.get_info().name
+                ),
+            }
+        }
+        anyhow::bail!("No usable GPU adapter found")
     }
 
     #[cfg(not(target_family = "wasm"))]
@@ -310,6 +340,7 @@ impl WgpuContext {
             adapter.get_info().backend
         );
         let backend = WgpuBackend::Native(adapter.get_info().backend);
+        let pipeline_cache = crate::pipeline_cache::DiskPipelineCache::open(&adapter, &device);
 
         Self {
             instance,
@@ -320,6 +351,7 @@ impl WgpuContext {
             dual_source_blending,
             color_texture_format,
             errors,
+            pipeline_cache,
             fast_dynamic_textures: crate::fast::dynamic_textures::TextureStore::default(),
         }
     }
@@ -420,6 +452,7 @@ impl WgpuContext {
             dual_source_blending,
             color_texture_format,
             errors,
+            pipeline_cache: None,
             fast_dynamic_textures: crate::fast::dynamic_textures::TextureStore::default(),
         };
         Ok(PreparedWebGraphics { context, surface })
@@ -441,10 +474,19 @@ impl WgpuContext {
                 Subpixel text antialiasing will be disabled."
             );
         }
+        if cfg!(not(target_family = "wasm"))
+            && adapter.features().contains(wgpu::Features::PIPELINE_CACHE)
+        {
+            required_features |= wgpu::Features::PIPELINE_CACHE;
+        }
 
         let color_atlas_texture_format = Self::select_color_texture_format(adapter)?;
-        #[cfg(target_family = "wasm")]
-        let required_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
+        // Native GLES 3.0 uses the same texture transport as WebGL2 and has no
+        // compute capability. Requiring downlevel compute limits rejects Apple's
+        // host-accelerated Android emulator even though these pipelines need none.
+        let texture_instances = adapter.get_info().backend == wgpu::Backend::Gl
+            && (cfg!(target_family = "wasm") || cfg!(target_os = "android"));
+        let required_limits = if texture_instances {
             wgpu::Limits::downlevel_webgl2_defaults()
                 .using_resolution(adapter.limits())
                 .using_alignment(adapter.limits())
@@ -453,10 +495,6 @@ impl WgpuContext {
                 .using_resolution(adapter.limits())
                 .using_alignment(adapter.limits())
         };
-        #[cfg(not(target_family = "wasm"))]
-        let required_limits = wgpu::Limits::downlevel_defaults()
-            .using_resolution(adapter.limits())
-            .using_alignment(adapter.limits());
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -481,9 +519,29 @@ impl WgpuContext {
 
     #[cfg(not(target_family = "wasm"))]
     pub fn instance(display: Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>) -> wgpu::Instance {
+        // Android skips GL here: initializing EGL slows startup, and GL is only
+        // a fallback there (see `WgpuRenderer::new`).
+        let backends = if cfg!(feature = "native-gles-only") {
+            wgpu::Backends::GL
+        } else if cfg!(target_os = "android") {
+            wgpu::Backends::VULKAN
+        } else {
+            wgpu::Backends::VULKAN | wgpu::Backends::GL
+        };
+        Self::instance_with_backends(display, backends)
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn instance_with_backends(
+        display: Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>,
+        backends: wgpu::Backends,
+    ) -> wgpu::Instance {
         wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
-            flags: wgpu::InstanceFlags::default(),
+            backends,
+            // GPUI issues no indirect draws. Indirect-call validation compiles its
+            // compute pipelines when the device is created, delaying the first frame.
+            flags: wgpu::InstanceFlags::default()
+                .difference(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL),
             backend_options: wgpu::BackendOptions::default(),
             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
             display,
@@ -697,6 +755,13 @@ impl WgpuContext {
         {
             return Ok(wgpu::TextureFormat::Rgba8Unorm);
         }
+        // Adreno 732 on Vulkan (Android 16) samples Bgra8Unorm atlas tiles as
+        // fully transparent under the fast frame recorder, though their
+        // uploads report no error; Rgba8Unorm tiles draw.
+        #[cfg(target_os = "android")]
+        if rgba_features.allowed_usages.contains(required_usages) {
+            return Ok(wgpu::TextureFormat::Rgba8Unorm);
+        }
         if bgra_features.allowed_usages.contains(required_usages) {
             return Ok(wgpu::TextureFormat::Bgra8Unorm);
         }
@@ -730,7 +795,10 @@ impl WgpuContext {
     }
 
     pub fn uses_webgl_instance_data(&self) -> bool {
-        matches!(self.backend, WgpuBackend::Gl) && cfg!(target_family = "wasm")
+        // Android GLES has the same storage-buffer alignment limits as WebGL2.
+        matches!(self.backend, WgpuBackend::Gl)
+            || (cfg!(target_os = "android")
+                && matches!(self.backend, WgpuBackend::Native(wgpu::Backend::Gl)))
     }
 
     pub fn supports_dual_source_blending(&self) -> bool {

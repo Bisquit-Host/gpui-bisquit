@@ -12,7 +12,13 @@ workspace = true
 path = "src/gpui_wgpu.rs"
 doctest = false
 
+[[test]]
+name = "render_perf"
+path = "tests/render_perf.rs"
+required-features = ["test-support"]
+
 [features]
+native-gles-only = []
 default = []
 bench-support = ["gpui/bench-support", "dep:image"]
 font-kit = ["dep:font-kit"]

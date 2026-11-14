@@ -282,6 +282,8 @@ fn encode(
                 &encoder,
                 surface_textures,
             )?,
+            // Metal does not draw liquid glass, as `MetalRenderer::draw` does not.
+            PrimitiveBatch::Backdrops(_) => {}
             PrimitiveBatch::SubpixelSprites { .. } => unreachable!("Metal uses grayscale glyphs"),
         }
     }

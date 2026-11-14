@@ -198,6 +198,8 @@ pub(crate) fn draw_primitives_to_texture(
                     return Err(error);
                 }
             }
+            // Metal does not draw liquid glass, as `MetalRenderer::draw` does not.
+            PrimitiveBatch::Backdrops(_) => {}
             PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
         }
     }

@@ -51,6 +51,7 @@ mod platform_scheduler;
 mod scene;
 mod shared_uri;
 mod spring;
+mod stretch;
 mod style;
 mod styled;
 mod subscription;

@@ -63,7 +63,11 @@ mod any_image_cache {
         cx: &mut App,
     ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
         let image_cache = image_cache.clone().downcast::<I>().unwrap();
-        image_cache.update(cx, |image_cache, cx| image_cache.load(resource, window, cx))
+        // Every image asks its cache on every frame it is laid out. Looking an
+        // entry up, or starting its load, changes nothing a view shows; the
+        // cache notifies when a load finishes. Counting the ask as a write
+        // would build every view reading the cache again on the next frame.
+        image_cache.update_for_draw(cx, |image_cache, cx| image_cache.load(resource, window, cx))
     }
 }
 

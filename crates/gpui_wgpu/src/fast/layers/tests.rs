@@ -899,6 +899,7 @@ impl Harness {
             rendering_params.path_sample_count,
             dual_source_blending,
             false,
+            None,
         );
         let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("atlas_sampler"),

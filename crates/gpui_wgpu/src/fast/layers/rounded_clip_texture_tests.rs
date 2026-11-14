@@ -20,6 +20,7 @@ fn texture_renderer() -> crate::wgpu_renderer::WgpuHeadlessRenderer {
         core.rendering_params.path_sample_count,
         false,
         true,
+        None,
     );
     let (instances, capacity) = crate::wgpu_renderer::WgpuRendererCore::create_instance_texture(
         device,

@@ -210,10 +210,10 @@ pub(crate) fn texture(
 
 pub(crate) fn pipeline_layouts<'a>(
     layouts: &mut Vec<Option<&'a wgpu::BindGroupLayout>>,
-    all: &'a crate::wgpu_renderer::WgpuBindGroupLayouts,
+    clip: &'a wgpu::BindGroupLayout,
 ) {
     layouts.resize(3, None);
-    layouts.push(Some(&all.fast_rounded_clip.layout));
+    layouts.push(Some(clip));
 }
 
 pub(crate) fn bind_unmasked(
@@ -249,6 +249,7 @@ pub(crate) fn shader(source: &str) -> String {
     let mut source = source.to_owned();
     for name in [
         "fs_quad",
+        "fs_quad_simple",
         "fs_shadow",
         "fs_path",
         "fs_underline",

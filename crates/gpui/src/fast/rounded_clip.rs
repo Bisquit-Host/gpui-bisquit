@@ -195,6 +195,10 @@ pub(crate) fn paint_children(
 /// neither the bounds tree nor the primitive draw orders.
 pub(crate) fn record(scene: &mut Scene, operation: ClipOperation) {
     scene.fast_rounded_clip.compiled = false;
+    let mut operation = operation;
+    if let (Some(stretch), ClipOperation::Begin(shape)) = (&scene.stretch, &mut operation) {
+        stretch.shape(shape);
+    }
     let index = scene.len();
     match operation {
         ClipOperation::Begin(shape) => {

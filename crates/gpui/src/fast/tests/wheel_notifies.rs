@@ -227,9 +227,9 @@ impl Render for StripPage {
 
 /// A wheel that cannot move a scroll container's content, because it is
 /// already at the end the wheel points to, changes nothing: the view that
-/// painted the container is not built again. A vertical wheel over a
-/// horizontal container, as a page scrolled past a carousel sends it on every
-/// event, is mapped onto its one axis and is the usual case.
+/// painted the container is not built again. A horizontal pan over a
+/// carousel at its end is the usual case; a precise delta moves only its own
+/// axis, so the pan is horizontal.
 #[test]
 fn a_wheel_that_cannot_move_its_container_does_not_build_its_view() {
     let mut cx = TestAppContext::single();
@@ -250,7 +250,7 @@ fn a_wheel_that_cannot_move_its_container_does_not_build_its_view() {
             window.dispatch_event(
                 PlatformInput::Scroll(ScrollEvent {
                     position: point(px(50.), px(25.)),
-                    delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+                    delta: ScrollDelta::Pixels(point(px(dy), px(0.))),
                     modifiers: Default::default(),
                     touch_phase: TouchPhase::Moved,
                     ..Default::default()

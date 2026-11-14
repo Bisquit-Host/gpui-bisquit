@@ -8,23 +8,23 @@ use crate::subscription::SingleSubscriberSet;
 use crate::taffy::TaffyLayoutEngine;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AtlasTile, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow,
-    Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
-    DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
-    EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
-    Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
-    Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
-    MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
-    RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
-    ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite,
-    Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap, Task,
-    TextInputConfiguration, TextInputStateChange, TextRenderingMode, TextStyle,
-    TextStyleRefinement, ThermalState, TransformationMatrix, Underline, UnderlineStyle,
-    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations,
-    WindowInsets, WindowOptions, WindowParams, WindowTextSystem, WindowVisibility, point,
-    prelude::*, px, rems, size, transparent_black,
+    AsyncWindowContext, AtlasTile, AvailableSpace, Backdrop, BackdropEffect, BackdropKind,
+    Background, BorderStyle, Bounds, BoxShadow, Capslock, Context, Corners, CursorHideMode,
+    CursorStyle, Decorations, DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree,
+    DisplayId, Edges, Effect, Entity, EntityId, EventEmitter, FileDropEvent, FontId, Global,
+    GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, InputPreference, IsZero, KeyBinding,
+    KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex,
+    Modifiers, ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent,
+    MouseUpEvent, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
+    PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, Priority, PromptButton,
+    PromptLevel, Quad, Render, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams,
+    Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR, ScaledPixels, Scene, Shadow, SharedString, Size,
+    StrikethroughStyle, Style, SubpixelSprite, Subscription, SystemWindowTab,
+    SystemWindowTabController, TabStopMap, Task, TextInputConfiguration, TextInputStateChange,
+    TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState, TransformationMatrix,
+    Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
+    WindowControls, WindowDecorations, WindowInsets, WindowOptions, WindowParams, WindowTextSystem,
+    WindowVisibility, point, prelude::*, px, rems, size, transparent_black,
 };
 
 use crate::gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer};
@@ -843,6 +843,9 @@ pub struct Hitbox {
     pub content_mask: ContentMask<Pixels>,
     /// Flags that specify hitbox behavior.
     pub behavior: HitboxBehavior,
+    /// The view to repaint when a touch presses this hitbox; `None` when it
+    /// shows no pressed feedback.
+    pub(crate) pressable: Option<EntityId>,
 }
 
 impl Hitbox {
@@ -1207,6 +1210,18 @@ impl Frame {
         hit_test
     }
 
+    /// The topmost hitbox with click listeners at `position`.
+    fn pressable_hitbox(&self, position: Point<Pixels>) -> Option<&Hitbox> {
+        let hit_test = self.hit_test(position);
+        hit_test.ids[..hit_test.hover_hitbox_count]
+            .iter()
+            .find_map(|id| {
+                self.hitboxes
+                    .iter()
+                    .find(|h| h.id == *id && h.pressable.is_some())
+            })
+    }
+
     pub(crate) fn focus_path(&self) -> SmallVec<[FocusId; 8]> {
         self.focus
             .map(|focus_id| self.dispatch_tree.focus_path(focus_id))
@@ -1224,6 +1239,22 @@ impl Frame {
 
         self.scene.finish();
     }
+}
+
+/// Android's `ViewConfiguration.getTapTimeout()`.
+const TOUCH_PRESS_TIMEOUT: Duration = Duration::from_millis(100);
+/// How long a quick tap keeps its pressed feedback after release.
+const TOUCH_PRESS_RELEASE_HOLD: Duration = Duration::from_millis(120);
+
+struct TouchPress {
+    position: Point<Pixels>,
+    /// The pressed element when the touch began. A tap that navigates must not
+    /// light up whatever replaces it under the finger.
+    bounds: Bounds<Pixels>,
+    /// The view drawing the pressed element, repainted when feedback changes.
+    view: EntityId,
+    started: Instant,
+    released: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
@@ -1310,6 +1341,9 @@ pub struct Window {
     touch_prediction_enabled: bool,
     long_press_timer: Option<Task<()>>,
     long_press_capture: Option<EntityId>,
+    touch_press: Option<TouchPress>,
+    touch_press_timer: Option<Task<()>>,
+    pub(crate) touch_pressed_hitbox: Option<HitboxId>,
     pub(crate) refreshing: bool,
     pub(crate) activation_observers: SingleSubscriberSet<AnyObserver>,
     pub(crate) focus: Option<FocusId>,
@@ -2440,6 +2474,9 @@ impl Window {
             touch_prediction_enabled: true,
             long_press_timer: None,
             long_press_capture: None,
+            touch_press: None,
+            touch_press_timer: None,
+            touch_pressed_hitbox: None,
             refreshing: false,
             activation_observers: SingleSubscriberSet::new(),
             focus: None,
@@ -4015,6 +4052,16 @@ impl Window {
         crate::fast::stats::FramePhaseTimes::end_prepaint(&mut self.fast_layout.phase_times);
         crate::fast::composition::finish_input(self);
         self.mouse_hit_test = self.next_frame.hit_test(self.mouse_position);
+        self.touch_pressed_hitbox = self
+            .touch_press
+            .as_ref()
+            .filter(|_| self.visible_touch_press().is_some())
+            .and_then(|press| {
+                self.next_frame
+                    .pressable_hitbox(press.position)
+                    .filter(|hitbox| hitbox.bounds == press.bounds)
+                    .map(|hitbox| hitbox.id)
+            });
 
         // Now actually paint the elements.
         #[cfg(feature = "profiler")]
@@ -4979,6 +5026,32 @@ impl Window {
         }
     }
 
+    /// Paints liquid glass over `shape`, or with `BackdropKind::Capture` copies
+    /// the pixels under `bounds` into `effect.slot`. `bounds` covers everything
+    /// a glass draws, including its shadow.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_backdrop(
+        &mut self,
+        kind: BackdropKind,
+        bounds: Bounds<Pixels>,
+        shape: Bounds<Pixels>,
+        effect: BackdropEffect,
+    ) {
+        self.invalidator.debug_assert_paint();
+        let scale_factor = self.scale_factor();
+        let mut effect = effect.scale_lengths(scale_factor);
+        effect.shape = shape.scale(scale_factor);
+        effect.opacity = self.element_opacity();
+        self.next_frame.scene.insert_primitive(Backdrop {
+            order: 0,
+            kind,
+            bounds: bounds.scale(scale_factor),
+            content_mask: self.snapped_content_mask(),
+            effect,
+        });
+    }
+
     /// Paint one or more quads into the scene for the next frame at the current stacking context.
     /// Quads are colored rectangular regions with an optional background, border, and corner radius.
     /// see [`fill`], [`outline`], and [`quad`] to construct this type.
@@ -5595,6 +5668,15 @@ impl Window {
     ///
     /// This method should only be called as part of the prepaint phase of element drawing.
     pub fn insert_hitbox(&mut self, bounds: Bounds<Pixels>, behavior: HitboxBehavior) -> Hitbox {
+        self.insert_hitbox_with_press(bounds, behavior, None)
+    }
+
+    pub(crate) fn insert_hitbox_with_press(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        behavior: HitboxBehavior,
+        pressable: Option<EntityId>,
+    ) -> Hitbox {
         self.invalidator.debug_assert_prepaint();
 
         let content_mask = crate::fast::layers::input::hitbox_mask(self);
@@ -5605,6 +5687,7 @@ impl Window {
             bounds,
             content_mask,
             behavior,
+            pressable,
         };
         self.next_frame.hitboxes.push(hitbox.clone());
         crate::fast::composition::record_input(self, id);
@@ -6169,6 +6252,7 @@ impl Window {
             tapped |= matches!(gesture, RecognizedTouchGesture::Tap { .. });
             self.dispatch_recognized_touch_gesture(gesture, cx);
         }
+        self.update_touch_press(event.phase, tapped, cx);
         if event.phase == crate::TouchPhase::Started {
             self.schedule_long_press_timer(cx);
         } else if self.touch_gestures.pending_long_press().is_none() {
@@ -6238,6 +6322,87 @@ impl Window {
                 }
             }
         }
+    }
+
+    /// Tracks the touch that may become a tap, mirroring Android's pressed
+    /// state: it shows after the tap timeout, flashes briefly for quick taps,
+    /// and clears as soon as the touch becomes a pan or long press.
+    fn update_touch_press(&mut self, phase: crate::TouchPhase, tapped: bool, cx: &mut App) {
+        let was_visible = self.visible_touch_press().is_some();
+        let previous_view = self.touch_press.as_ref().map(|press| press.view);
+        let now = Instant::now();
+        if tapped {
+            if let Some(press) = &mut self.touch_press {
+                press.released = Some(now);
+                self.schedule_touch_press_refresh(TOUCH_PRESS_RELEASE_HOLD, cx);
+            }
+        } else if phase == crate::TouchPhase::Started {
+            self.touch_press = self
+                .touch_gestures
+                .pending_tap_position()
+                .and_then(|position| {
+                    let hitbox = self.rendered_frame.pressable_hitbox(position)?;
+                    Some(TouchPress {
+                        position,
+                        bounds: hitbox.bounds,
+                        view: hitbox.pressable?,
+                        started: now,
+                        released: None,
+                    })
+                });
+            if self.touch_press.is_some() {
+                self.schedule_touch_press_refresh(TOUCH_PRESS_TIMEOUT, cx);
+            }
+        } else if self
+            .touch_press
+            .as_ref()
+            .is_some_and(|press| press.released.is_none())
+            && self.touch_gestures.pending_tap_position().is_none()
+        {
+            self.touch_press = None;
+            self.touch_press_timer = None;
+        }
+        if was_visible != self.visible_touch_press().is_some()
+            && let Some(view) = self
+                .touch_press
+                .as_ref()
+                .map(|press| press.view)
+                .or(previous_view)
+        {
+            cx.notify(view);
+        }
+    }
+
+    fn schedule_touch_press_refresh(&mut self, delay: Duration, cx: &mut App) {
+        self.touch_press_timer = Some(self.spawn(cx, async move |cx| {
+            cx.background_executor.timer(delay).await;
+            cx.update(|window, cx| {
+                window.touch_press_timer = None;
+                let Some(view) = window.touch_press.as_ref().map(|press| press.view) else {
+                    return;
+                };
+                if window
+                    .touch_press
+                    .as_ref()
+                    .and_then(|press| press.released)
+                    .is_some_and(|released| released.elapsed() >= TOUCH_PRESS_RELEASE_HOLD)
+                {
+                    window.touch_press = None;
+                }
+                cx.notify(view);
+            })
+            .log_err();
+        }));
+    }
+
+    /// Where a touch currently shows pressed feedback, if anywhere.
+    pub fn visible_touch_press(&self) -> Option<Point<Pixels>> {
+        self.touch_press
+            .as_ref()
+            .filter(|press| {
+                press.released.is_some() || press.started.elapsed() >= TOUCH_PRESS_TIMEOUT
+            })
+            .map(|press| press.position)
     }
 
     fn schedule_long_press_timer(&mut self, cx: &mut App) {

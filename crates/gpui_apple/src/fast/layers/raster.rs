@@ -267,6 +267,8 @@ fn draw_tile_scene(
                 command_encoder,
                 surface_textures,
             )?,
+            // Metal does not draw liquid glass, as `MetalRenderer::draw` does not.
+            PrimitiveBatch::Backdrops(_) => {}
             // The core keeps paths out of layers: a path rasterized into a
             // tile and moved by an odd number of pixels antialiases
             // differently. Metal draws no subpixel sprites.

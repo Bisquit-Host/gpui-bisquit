@@ -37,6 +37,15 @@ impl MetalAtlas {
     ) -> Option<Retained<ProtocolObject<dyn MTLTexture>>> {
         Some(self.0.lock().backend.texture(id)?.metal_texture.clone())
     }
+
+    /// Drops every cached glyph and image texture. The next paint repopulates
+    /// the atlas from GPUI's CPU-side scene and image data.
+    pub(crate) fn clear(&self) {
+        self.0.lock().clear(|backend| {
+            backend.monochrome_textures = Default::default();
+            backend.polychrome_textures = Default::default();
+        });
+    }
 }
 
 struct MetalAtlasTextures {
@@ -568,5 +577,42 @@ mod tests {
             })
             .expect("inserting atlas tile")
             .expect("retrieving inserted atlas tile")
+    }
+
+    #[test]
+    fn test_clear_releases_textures_and_stale_tiles() {
+        let Some(atlas) = create_atlas() else {
+            return;
+        };
+        let key = make_image_key(1, 0);
+        let tile = insert_tile(
+            &atlas,
+            key.clone(),
+            Size {
+                width: DevicePixels(64),
+                height: DevicePixels(64),
+            },
+        );
+
+        assert!(atlas.metal_texture(tile.texture_id).is_some());
+        atlas.clear();
+
+        let lock = atlas.0.lock();
+        assert!(!lock.contains(&key));
+        assert!(lock.backend.monochrome_textures.textures.is_empty());
+        assert!(lock.backend.monochrome_textures.free_list.is_empty());
+        assert!(lock.backend.polychrome_textures.textures.is_empty());
+        assert!(lock.backend.polychrome_textures.free_list.is_empty());
+        drop(lock);
+
+        let rebuilt_tile = insert_tile(
+            &atlas,
+            key,
+            Size {
+                width: DevicePixels(64),
+                height: DevicePixels(64),
+            },
+        );
+        assert!(atlas.metal_texture(rebuilt_tile.texture_id).is_some());
     }
 }

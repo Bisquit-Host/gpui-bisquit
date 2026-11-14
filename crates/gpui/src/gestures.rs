@@ -940,6 +940,14 @@ impl TouchGestureRecognizer {
         recognized
     }
 
+    /// The start of a touch that can still become a tap.
+    pub(crate) fn pending_tap_position(&self) -> Option<Point<Pixels>> {
+        match &self.state {
+            TouchGestureState::Pending { touch, .. } => Some(touch.start_position),
+            _ => None,
+        }
+    }
+
     pub(crate) fn pending_long_press(&self) -> Option<(TouchId, Duration)> {
         let TouchGestureState::Pending {
             touch,

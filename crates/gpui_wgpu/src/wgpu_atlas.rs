@@ -233,6 +233,11 @@ impl WgpuAtlasTextures {
             },
             generation,
             allocator: BucketedAtlasAllocator::new(device_size_to_etagere(size)),
+            mirror: (kind == AtlasTextureKind::Monochrome).then(|| Mirror {
+                pixels: vec![0; size.width.0 as usize * size.height.0 as usize],
+                width: size.width.0 as usize,
+                dirty: None,
+            }),
             format,
             texture,
             view,
@@ -257,6 +262,10 @@ impl WgpuAtlasTextures {
     }
 
     fn upload_texture(&mut self, id: AtlasTextureId, bounds: Bounds<DevicePixels>, bytes: &[u8]) {
+        if let Some(mirror) = self.storage.get_mut(id).and_then(|t| t.mirror.as_mut()) {
+            mirror.write(bounds, bytes);
+            return;
+        }
         let data = self
             .storage
             .get(id)
@@ -268,6 +277,38 @@ impl WgpuAtlasTextures {
     }
 
     fn flush_uploads(&mut self) {
+        for texture in self.storage.monochrome_textures.iter_mut() {
+            let Some(mirror) = texture.mirror.as_mut() else {
+                continue;
+            };
+            let Some(dirty) = mirror.dirty.take() else {
+                continue;
+            };
+            let offset = dirty.origin.y.0 as usize * mirror.width + dirty.origin.x.0 as usize;
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: dirty.origin.x.0 as u32,
+                        y: dirty.origin.y.0 as u32,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &mirror.pixels[offset..],
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(mirror.width as u32),
+                    rows_per_image: None,
+                },
+                wgpu::Extent3d {
+                    width: dirty.size.width.0 as u32,
+                    height: dirty.size.height.0 as u32,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
         for upload in self.pending_uploads.drain(..) {
             let Some(texture) = self.storage.get(upload.id) else {
                 continue;
@@ -336,6 +377,42 @@ impl WgpuAtlasStorage {
             .get(id.index as usize)
             .and_then(|t| t.as_ref())
     }
+
+    fn get_mut(&mut self, id: AtlasTextureId) -> Option<&mut WgpuAtlasTexture> {
+        self[id.kind]
+            .textures
+            .get_mut(id.index as usize)
+            .and_then(|t| t.as_mut())
+    }
+}
+
+/// A CPU copy of a monochrome (glyph and icon) atlas texture. New tiles are
+/// written here and reach the GPU as one copy of their bounding box per frame:
+/// Adreno's driver allocates kernel memory for every buffer-to-image copy, and
+/// the first frames, with hundreds of new glyphs, spent most of their time in it.
+struct Mirror {
+    pixels: Vec<u8>,
+    width: usize,
+    dirty: Option<Bounds<DevicePixels>>,
+}
+
+impl Mirror {
+    fn write(&mut self, bounds: Bounds<DevicePixels>, bytes: &[u8]) {
+        let (x, y) = (bounds.origin.x.0 as usize, bounds.origin.y.0 as usize);
+        let row = bounds.size.width.0 as usize;
+        if row == 0 || bounds.size.height.0 <= 0 {
+            return;
+        }
+        for (dy, source) in bytes
+            .chunks_exact(row)
+            .take(bounds.size.height.0 as usize)
+            .enumerate()
+        {
+            let start = (y + dy) * self.width + x;
+            self.pixels[start..start + row].copy_from_slice(source);
+        }
+        self.dirty = Some(self.dirty.map_or(bounds, |dirty| dirty.union(&bounds)));
+    }
 }
 
 struct WgpuAtlasTexture {
@@ -345,6 +422,7 @@ struct WgpuAtlasTexture {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     format: wgpu::TextureFormat,
+    mirror: Option<Mirror>,
     live_atlas_keys: u32,
 }
 
