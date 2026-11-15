@@ -320,3 +320,10 @@ fn scenes_are_ordered_and_drawn_in_painting_order() {
         }
     }
 }
+
+/// Every painted primitive is stored and replayed as a `Primitive`, so a
+/// rare, large variant must not set the size of all of them.
+#[test]
+fn primitives_are_no_larger_than_a_path() {
+    assert!(size_of::<crate::Primitive>() <= size_of::<crate::Path<crate::ScaledPixels>>() + 8);
+}

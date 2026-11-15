@@ -151,7 +151,7 @@ impl Scene {
             }
             Primitive::Backdrop(backdrop) => {
                 backdrop.order = order;
-                self.backdrops.push(*backdrop);
+                self.backdrops.push(**backdrop);
             }
         }
         self.paint_operations
@@ -249,7 +249,8 @@ pub enum Primitive {
     SubpixelSprite(SubpixelSprite),
     PolychromeSprite(PolychromeSprite),
     Surface(PaintSurface),
-    Backdrop(Backdrop),
+    /// Boxed: glass parameters would otherwise size every primitive.
+    Backdrop(Box<Backdrop>),
 }
 
 #[expect(missing_docs)]
@@ -1131,6 +1132,6 @@ pub struct Backdrop {
 
 impl From<Backdrop> for Primitive {
     fn from(backdrop: Backdrop) -> Self {
-        Primitive::Backdrop(backdrop)
+        Primitive::Backdrop(Box::new(backdrop))
     }
 }

@@ -18,25 +18,25 @@ use crate::{
 fn drawing_sequence(scene: &Scene) -> Vec<Primitive> {
     let mut sequence: Vec<((u32, u8, usize), Primitive)> = Vec::new();
     macro_rules! gather {
-        ($field:ident, $rank:expr, $variant:ident) => {
+        ($field:ident, $rank:expr) => {
             sequence.extend(
                 scene
                     .$field
                     .iter()
                     .enumerate()
-                    .map(|(ix, p)| ((p.order, $rank, ix), Primitive::$variant(p.clone()))),
+                    .map(|(ix, p)| ((p.order, $rank, ix), Primitive::from(p.clone()))),
             )
         };
     }
-    gather!(shadows, 0, Shadow);
-    gather!(quads, 1, Quad);
-    gather!(paths, 2, Path);
-    gather!(underlines, 3, Underline);
-    gather!(monochrome_sprites, 4, MonochromeSprite);
-    gather!(subpixel_sprites, 5, SubpixelSprite);
-    gather!(polychrome_sprites, 6, PolychromeSprite);
-    gather!(surfaces, 7, Surface);
-    gather!(backdrops, 8, Backdrop);
+    gather!(shadows, 0);
+    gather!(quads, 1);
+    gather!(paths, 2);
+    gather!(underlines, 3);
+    gather!(monochrome_sprites, 4);
+    gather!(subpixel_sprites, 5);
+    gather!(polychrome_sprites, 6);
+    gather!(surfaces, 7);
+    gather!(backdrops, 8);
     sequence.sort_by_key(|(key, _)| *key);
     sequence
         .into_iter()
@@ -227,7 +227,7 @@ fn describe(primitive: &Primitive) -> String {
             }
         ),
         Primitive::Surface(p) => format!("surface {:?} {:?}", p.bounds, p.content_mask),
-        Primitive::Backdrop(p) => format!("{:?}", Backdrop { order: 0, ..*p }),
+        Primitive::Backdrop(p) => format!("{:?}", Backdrop { order: 0, ..**p }),
     }
 }
 
