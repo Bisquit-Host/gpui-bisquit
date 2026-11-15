@@ -1076,8 +1076,6 @@ impl IosWindow {
                 .to_string_lossy()
                 .into_owned();
 
-            log::info!("GPUI iOS: Text input: {:?}", text_str);
-
             // Try the global text input callback (for our TextInput components).
             // The text is captured in PENDING_TEXT regardless of whether we also
             // send key events below.
