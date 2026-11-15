@@ -1998,7 +1998,8 @@ impl Window {
 
                 // Keep presenting briefly after high-rate input to prevent display
                 // underclocking, but subject to the same power limits as redraws.
-                let high_rate_input = input_rate_tracker.borrow_mut().is_high_rate();
+                let high_rate_input = crate::fast::misc::present_sustain::ENABLED
+                    && input_rate_tracker.borrow_mut().is_high_rate();
                 let has_next_frame_callbacks = !next_frame_callbacks.borrow().is_empty();
                 let has_frame_demand = invalidator.is_dirty()
                     || force_render
