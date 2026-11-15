@@ -67,6 +67,8 @@ pub(crate) struct FrameState {
     pub(crate) backdrops: std::cell::RefCell<Option<crate::backdrop::BackdropRenderer>>,
     /// Where a frame drawn offscreen for its backdrops is copied when finished.
     pub(crate) backdrop_blit: Option<wgpu::TextureView>,
+    /// Consecutive frames without paths, counted by `fast::path_targets`.
+    pub(crate) path_idle_frames: u32,
     vertices: Vec<PathRasterizationVertex>,
     sprites: Vec<PathSprite>,
     path_batches: Vec<PathBatch>,
@@ -1122,7 +1124,7 @@ fn draw_batch(
 /// What a path rasterization pass keeps of its target. Multisampled paths are
 /// read only through their resolve, so storing the samples would write the
 /// multisampled texture, several times the window's size, for nothing.
-fn path_store_op(resolve_target: Option<&wgpu::TextureView>) -> wgpu::StoreOp {
+pub(crate) fn path_store_op(resolve_target: Option<&wgpu::TextureView>) -> wgpu::StoreOp {
     if resolve_target.is_some() {
         wgpu::StoreOp::Discard
     } else {

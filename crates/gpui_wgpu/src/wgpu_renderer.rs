@@ -389,7 +389,7 @@ struct CachedTextureBindGroup {
 }
 
 impl WgpuResources {
-    fn invalidate_intermediate_textures(&mut self) {
+    pub(crate) fn invalidate_intermediate_textures(&mut self) {
         self.path_intermediate_texture = None;
         self.path_intermediate_view = None;
         self.path_msaa_texture = None;
@@ -986,7 +986,7 @@ impl WgpuRendererCore {
             sample_count,
             dimension: wgpu::TextureDimension::D2,
             format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: crate::fast::path_targets::MSAA_USAGE,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1398,13 +1398,13 @@ impl WgpuRendererCore {
         &self.resources
     }
 
-    fn resources_mut(&mut self) -> &mut WgpuResources {
+    pub(crate) fn resources_mut(&mut self) -> &mut WgpuResources {
         &mut self.resources
     }
 
     /// Path rendering goes through an intermediate texture that must match the frame
     /// target's dimensions, so the textures are keyed by size and rebuilt on mismatch.
-    fn ensure_intermediate_textures(&mut self, size: Size<DevicePixels>) {
+    pub(crate) fn ensure_intermediate_textures(&mut self, size: Size<DevicePixels>) {
         let width = size.width.0 as u32;
         let height = size.height.0 as u32;
         if self
@@ -1461,7 +1461,7 @@ impl WgpuRendererCore {
         );
 
         self.atlas.before_frame();
-        self.ensure_intermediate_textures(size);
+        crate::fast::path_targets::prepare(self, scene, size);
 
         let gamma_params = GammaParams {
             gamma_ratios: self.rendering_params.gamma_ratios,
@@ -1926,7 +1926,7 @@ impl WgpuRendererCore {
                     resolve_target,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
+                        store: crate::fast::frame::path_store_op(resolve_target),
                     },
                     depth_slice: None,
                 })],
