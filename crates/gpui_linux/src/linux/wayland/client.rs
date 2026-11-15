@@ -1483,8 +1483,15 @@ impl WaylandConnection {
             };
             let data_source = data_device_manager
                 .create_data_source(&state.globals.qh, DataSourceKind::Clipboard);
-            for mime_type in TEXT_MIME_TYPES {
+            // Offer image entries under their mime type so other applications
+            // can paste them; upstream only offers text.
+            for mime_type in state.clipboard.image_mime_types() {
                 data_source.offer(mime_type.to_string());
+            }
+            if state.clipboard.has_text() {
+                for mime_type in TEXT_MIME_TYPES {
+                    data_source.offer(mime_type.to_string());
+                }
             }
             data_source.offer(state.clipboard.self_mime());
             data_device.set_selection(Some(&data_source), serial.as_raw());

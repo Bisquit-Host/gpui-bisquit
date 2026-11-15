@@ -174,8 +174,38 @@ impl Clipboard {
         self.self_mime.clone()
     }
 
-    pub fn send(&self, _mime_type: String, fd: OwnedFd) {
-        if let Some(text) = self.contents.as_ref().and_then(|contents| contents.text()) {
+    /// Mime types of the image entries in the current clipboard contents.
+    pub fn image_mime_types(&self) -> Vec<&'static str> {
+        self.contents
+            .iter()
+            .flat_map(|contents| contents.entries())
+            .filter_map(|entry| match entry {
+                ClipboardEntry::Image(image) => Some(image.format.mime_type()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn has_text(&self) -> bool {
+        self.contents
+            .as_ref()
+            .is_some_and(|contents| contents.text().is_some())
+    }
+
+    pub fn send(&self, mime_type: String, fd: OwnedFd) {
+        let Some(contents) = self.contents.as_ref() else {
+            return;
+        };
+        // CodexImage patch: serve image bytes for an image mime request.
+        let image = contents.entries().iter().find_map(|entry| match entry {
+            ClipboardEntry::Image(image) if image.format.mime_type() == mime_type => {
+                Some(image.bytes.clone())
+            }
+            _ => None,
+        });
+        if let Some(bytes) = image {
+            self.send_bytes(fd, bytes);
+        } else if let Some(text) = contents.text() {
             self.send_bytes(fd, text.as_bytes().to_owned());
         }
     }
