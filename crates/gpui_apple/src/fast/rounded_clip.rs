@@ -51,6 +51,17 @@ pub(crate) fn has_groups(scene: &Scene) -> bool {
         .any(|sprite| group(scene, sprite.tile.texture_id).is_some())
 }
 
+/// Whether `scene`, or the content of a rounded clip group in it at any depth,
+/// has paths.
+pub(crate) fn has_paths(scene: &Scene) -> bool {
+    !scene.paths.is_empty()
+        || scene.polychrome_sprites.iter().any(|sprite| {
+            group(scene, sprite.tile.texture_id)
+                .and_then(|frame| frame.content.scene())
+                .is_some_and(has_paths)
+        })
+}
+
 pub(crate) fn default_mask(encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>) {
     let count = 0u32;
     let empty = [0f32; 12];
@@ -162,10 +173,17 @@ pub(crate) fn draw_tile(
     background: MTLClearColor,
     surface_textures: &mut Vec<CFRetained<CVMetalTexture>>,
 ) -> Result<()> {
-    let old_texture = renderer.path_intermediate_texture.take();
-    let old_msaa = renderer.path_intermediate_msaa_texture.take();
+    let paths = has_paths(scene);
+    let frame_textures = paths.then(|| {
+        (
+            renderer.path_intermediate_texture.take(),
+            renderer.path_intermediate_msaa_texture.take(),
+        )
+    });
     let result = (|| {
-        renderer.update_path_intermediate_textures(viewport)?;
+        if paths {
+            renderer.update_path_intermediate_textures(viewport)?;
+        }
         let bindings = write_instances(scene, writer)?;
         let encoder =
             new_command_encoder_for_texture(commands, texture, viewport, Some(background))?;
@@ -184,8 +202,10 @@ pub(crate) fn draw_tile(
         .endEncoding();
         Ok(())
     })();
-    renderer.path_intermediate_texture = old_texture;
-    renderer.path_intermediate_msaa_texture = old_msaa;
+    if let Some((texture, msaa)) = frame_textures {
+        renderer.path_intermediate_texture = texture;
+        renderer.path_intermediate_msaa_texture = msaa;
+    }
     result
 }
 

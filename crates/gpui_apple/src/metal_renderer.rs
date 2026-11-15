@@ -168,6 +168,7 @@ pub struct MetalRenderer {
     drawable_size: Size<DevicePixels>,
     gpu_resources_released: bool,
     pub(crate) fast_layers: crate::fast::layers::TileCache,
+    pub(crate) fast_path_textures: crate::fast::path_textures::PathTextures,
 }
 
 #[repr(C)]
@@ -464,6 +465,7 @@ impl MetalRenderer {
             gpu_resources_released: false,
             layer,
             fast_layers: crate::fast::layers::TileCache::default(),
+            fast_path_textures: crate::fast::path_textures::PathTextures::default(),
         })
     }
 
@@ -547,9 +549,7 @@ impl MetalRenderer {
         if let Some(layer) = &self.layer {
             layer.setDrawableSize(CGSize::new(size.width.0 as f64, size.height.0 as f64));
         }
-        if let Err(error) = self.update_path_intermediate_textures(size) {
-            log::error!("failed to resize path textures: {error:#}");
-        }
+        crate::fast::path_textures::release(self);
         crate::fast::layers::TileCache::clear(&mut self.fast_layers);
     }
 
@@ -742,9 +742,7 @@ impl MetalRenderer {
         texture: &ProtocolObject<dyn MTLTexture>,
         viewport_size: Size<DevicePixels>,
     ) -> Result<Retained<ProtocolObject<dyn MTLCommandBuffer>>> {
-        if self.path_intermediate_texture.is_none() {
-            self.update_path_intermediate_textures(viewport_size)?;
-        }
+        crate::fast::path_textures::prepare(self, scene, viewport_size)?;
         crate::fast::layers::raster::rasterize_tiles(self, scene);
         let mut writer = InstanceBufferWriter::new(
             &self.device,
@@ -829,7 +827,7 @@ impl MetalRenderer {
         // Headless callers do not have a Cocoa event-loop pool to release
         // autoreleased command buffers and render-pass descriptors.
         objc2::rc::autoreleasepool(|_| {
-            self.update_path_intermediate_textures(size)?;
+            crate::fast::path_textures::release(self);
             self.render_offscreen(scene, size)
         })
     }
@@ -896,8 +894,6 @@ impl MetalRenderer {
         }
 
         objc2::rc::autoreleasepool(|_| {
-            self.update_path_intermediate_textures(size)?;
-
             let needs_new_target = self.headless_render_target.as_ref().is_none_or(|texture| {
                 texture.width() != size.width.0 as usize
                     || texture.height() != size.height.0 as usize
@@ -2056,7 +2052,7 @@ mod tests {
     fn gpu_resources_restore_at_the_latest_hidden_size() -> Result<()> {
         let mut renderer = MetalRenderer::new(Default::default(), false, false)?;
         renderer.update_drawable_size(size(DevicePixels(64), DevicePixels(48)));
-        assert!(renderer.path_intermediate_texture.is_some());
+        assert!(renderer.path_intermediate_texture.is_none());
 
         assert!(renderer.release_gpu_resources());
         assert!(!renderer.release_gpu_resources());
@@ -2075,11 +2071,7 @@ mod tests {
             .context("restore should recreate the layer")?;
         assert_eq!(layer.drawableSize(), CGSize::new(96.0, 72.0));
         assert_eq!(layer.contentsScale(), 2.0);
-        let path_texture = renderer
-            .path_intermediate_texture
-            .as_deref()
-            .context("restore should recreate the path target")?;
-        assert_eq!((path_texture.width(), path_texture.height()), (96, 72));
+        assert!(renderer.path_intermediate_texture.is_none());
         Ok(())
     }
 
