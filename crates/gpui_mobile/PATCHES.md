@@ -6,7 +6,7 @@ and licenses are included. The root dependency still records the git revision;
 Cargo's source patch selects this copy.
 
 GPUI and its wgpu renderer use gpui-fast commit
-`a427a7d9a6072473ad092b1673cd5235f99284cc`, shared with desktop through the
+`80be50164adaf4db69eaf4a25037f20b6f447835`, shared with desktop through the
 root git-source patch. `gpui-mobile`'s manifest names the same source and revision. The vendored source is in `crates`.
 See [README.md](../../PATCHES.md) for the full renderer patch port inventory.
 

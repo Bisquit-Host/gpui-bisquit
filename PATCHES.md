@@ -13,7 +13,7 @@ and the pinned upstream revisions.
 
 `crates` holds `gpui`, `gpui_wgpu`, `gpui_apple` and
 `gpui_macos` from [gpui-fast](https://github.com/longbridge/gpui-fast) commit
-`a427a7d9a6072473ad092b1673cd5235f99284cc`, which imports Zed's GPUI at
+`80be50164adaf4db69eaf4a25037f20b6f447835`, which imports Zed's GPUI at
 `d2a4fb6ded7c470be25d1541281da3882495b65b` and adds retained views, retained
 layout and scroll layers. Examples, external tests and benches are omitted;
 their manifest targets and dev dependencies are removed. The nested workspace
@@ -26,6 +26,13 @@ Retained views and scroll layers can be turned off at runtime with
 `GPUI_VIEW_RETENTION=0` and `GPUI_SCROLL_LAYERS=0`, to tell a stale view
 from a renderer problem. Scroll layers are compiled for macOS, Linux and
 Windows only; Android draws retained views without them.
+
+### Merge of gpui-fast 80be501 (2026-11-15)
+
+Merged from `a427a7d` with `git merge`; nothing conflicted. Both sides changed
+`gpui/src/elements/list.rs` (their deferred `measure_all` after a width change,
+our nested scrolling and `Infer` row width), `fast/tests/layers.rs`, the Wayland
+client and `gpui_macos/src/window.rs`, in separate hunks.
 
 ### Rebase onto gpui-fast a427a7d (2026-11-09)
 
