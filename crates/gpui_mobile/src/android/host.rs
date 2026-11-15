@@ -380,9 +380,11 @@ fn render_thread(launch: Launch) {
 
         platform.tick();
         platform.flush_main_thread_tasks();
-        if crate::TEXT_INPUT_DIRTY.load(Ordering::Acquire) {
-            // Software-keyboard text bypasses GPUI's invalidator; the frame
-            // callback turns it into a forced render.
+        // Queued software-keyboard events are applied by the frame callback;
+        // text for a `set_text_input_callback` client bypasses GPUI's
+        // invalidator, and the callback turns it into a forced render.
+        let text_pending = crate::TEXT_INPUT_PENDING.swap(false, Ordering::AcqRel);
+        if text_pending || crate::TEXT_INPUT_DIRTY.load(Ordering::Acquire) {
             super::frame_source::schedule_frame();
         }
         let window = platform.primary_window();

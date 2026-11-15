@@ -867,9 +867,12 @@ pub fn run_event_loop(app: &AndroidApp) {
         if let Some(platform) = PLATFORM.get() {
             if INIT_WINDOW_DONE.load(Ordering::Relaxed) && app_is_active {
                 platform.flush_main_thread_tasks();
-                // Software-keyboard text bypasses GPUI's invalidator; the
-                // frame callback turns it into a forced render.
-                if crate::TEXT_INPUT_DIRTY.load(Ordering::Acquire) {
+                // Queued software-keyboard events are applied by the frame
+                // callback; text for a `set_text_input_callback` client
+                // bypasses GPUI's invalidator, and the callback turns it into
+                // a forced render.
+                let text_pending = crate::TEXT_INPUT_PENDING.swap(false, Ordering::AcqRel);
+                if text_pending || crate::TEXT_INPUT_DIRTY.load(Ordering::Acquire) {
                     super::frame_source::schedule_frame();
                 }
                 super::frame_source::latch_vsync();

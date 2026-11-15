@@ -173,6 +173,19 @@ pub(crate) fn mark_text_input_dirty() {
     android::frame_source::wake();
 }
 
+/// Software-keyboard events queued for the frame that applies them. They
+/// reach GPUI through the window's input handler, which notifies the view it
+/// edits, so unlike [`TEXT_INPUT_DIRTY`] the frame is not forced to render.
+#[cfg(target_os = "android")]
+pub(crate) static TEXT_INPUT_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Asks for the frame that drains queued software-keyboard events.
+#[cfg(target_os = "android")]
+pub(crate) fn request_text_input_frame() {
+    TEXT_INPUT_PENDING.store(true, Ordering::Release);
+    android::frame_source::wake();
+}
+
 thread_local! {
     /// Global text input callback — set by the active text input component.
     /// When the software keyboard sends text, this callback is invoked.

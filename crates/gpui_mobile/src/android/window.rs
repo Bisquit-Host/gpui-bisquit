@@ -1434,7 +1434,7 @@ impl PlatformWindow for AndroidPlatformWindow {
         let input_callback = Arc::clone(&self.ime_input_callback);
         let accessibility = Rc::clone(&self.accessibility);
         let mut callback = callback;
-        let callback: Box<dyn FnMut(RequestFrameOptions)> = Box::new(move |options| {
+        let callback: Box<dyn FnMut(RequestFrameOptions)> = Box::new(move |mut options| {
             let scrolls = accessibility
                 .borrow()
                 .as_ref()
@@ -1444,6 +1444,12 @@ impl PlatformWindow for AndroidPlatformWindow {
                 input_callback.lock()(gpui::PlatformInput::Scroll(scroll));
             }
             super::text_input::drain(&input_handler, &mut **input_callback.lock());
+            // Events applied through the input handler notify the view they
+            // edit. Text handed to a `set_text_input_callback` client, and a
+            // host that raises the flag itself, live outside GPUI's entities,
+            // so only those force the render.
+            options.force_render |=
+                crate::TEXT_INPUT_DIRTY.swap(false, std::sync::atomic::Ordering::AcqRel);
             callback(options);
         });
         // PlatformWindow gives us Box<dyn FnMut(...)> (not Send).
@@ -1456,17 +1462,13 @@ impl PlatformWindow for AndroidPlatformWindow {
 
         let force_render_once = Arc::clone(&self.window.force_render_once);
         self.window.on_request_frame(move || {
-            // Check if text input arrived since last frame — if so, force a
-            // render so drain_pending_text() runs and the UI updates.
-            let text_dirty =
-                crate::TEXT_INPUT_DIRTY.swap(false, std::sync::atomic::Ordering::AcqRel);
             // A freshly attached surface has an empty swapchain; repaint in full.
             let surface_new = force_render_once.swap(false, std::sync::atomic::Ordering::AcqRel);
 
             let mut cb = send_callback.lock();
             cb(RequestFrameOptions {
                 require_presentation: false,
-                force_render: text_dirty || surface_new,
+                force_render: surface_new,
                 signal_at: None,
                 signal_source: super::frame_source::request_source(),
             });
