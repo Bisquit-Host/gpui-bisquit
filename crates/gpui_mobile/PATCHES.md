@@ -180,6 +180,27 @@ Hitch pass, 2026-11-10 (emulator, CPU profile of the render thread):
   Inter's hinting program was about 70% of that: a fifth of the frame that first
   draws a page. Other platforms keep hinting.
 
+Memory and idle pass, 2026-11-15 (macOS tests and an Android compile check; not
+yet run on a device):
+
+- `gpui_wgpu/src/fast/path_targets.rs`, `gpui_apple/src/fast/path_textures.rs`:
+  the path intermediate texture and its multisampled twin are created by the
+  first frame that draws a path and dropped after 60 frames without one, or on a
+  resize. Every frame used to create them at the frame's size: 52 MB on a
+  1080x2400 surface. The wgpu multisampled texture is a transient attachment.
+- `gpui/src/fast/misc/present_sustain.rs`: Android and iOS no longer present the
+  last frame on every tick for a second after a burst of input. Each of those
+  presents drew the whole unchanged scene again, glass passes included.
+- `crates/gpui_mobile/src/android/text_input.rs`, `window.rs`, `lib.rs`: queued
+  IME events ask for a frame through `TEXT_INPUT_PENDING` instead of raising
+  `TEXT_INPUT_DIRTY`, so a keystroke redraws the view it edits, not the window.
+  `TEXT_INPUT_DIRTY` still forces a render, for `set_text_input_callback`
+  clients and hosts that raise it themselves. An input view must notify when the
+  input handler edits it.
+- `gpui/src/scene.rs`: `Primitive::Backdrop` is boxed. At 216 bytes it sized
+  every primitive and paint operation; they are 168 bytes again.
+- `crates/gpui_mobile/src/ios/window.rs`: typed text is no longer logged.
+
 The app vendors the Java half of rustls-platform-verifier 0.7.1 in
 `android/app/src/main/java/org/rustls/platformverifier`, with the AAR's network
 security config. Its revocation check built `PKIXBuilderParameters` from the
