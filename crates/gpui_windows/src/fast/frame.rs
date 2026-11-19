@@ -297,6 +297,8 @@ pub(crate) fn draw_scene_masked(
             }
             // Upstream draws nothing for surfaces on Windows either.
             PrimitiveBatch::Surfaces(_) => Ok(()),
+            // Liquid glass is only drawn by the mobile wgpu renderer.
+            PrimitiveBatch::Backdrops(_) => Ok(()),
         }
         .with_context(|| scene_too_large(scene))?;
     }
