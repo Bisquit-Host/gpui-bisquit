@@ -165,6 +165,11 @@ unchanged, and a new entry needs as good a reason.
   in `fast::rounded_clip_scene`; Metal, WGPU and Direct3D evaluate the clip
   stack directly without intermediate render targets.
 - `crates/gpui/Cargo.toml` names this repository and sets `publish = false`.
+- `ShapedLine` gains `paint_glyphs_scaled` (in `fast::glyphs`): a line shaped
+  once and painted at any scale, for text on a zoomable canvas. Upstream's
+  only way to do that is `Window::paint_glyph` a glyph at a time, which gives
+  each glyph its own place in the scene's ordering and cannot skip the glyphs
+  outside the content mask.
 - Window composition, the API of
   [zed#62379](https://github.com/zed-industries/zed/pull/62379), which
   upstream has not merged yet: native views drawn between a window's GPUI

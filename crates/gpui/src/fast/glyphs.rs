@@ -3,8 +3,8 @@
 use crate::{
     App, AtlasTile, Bounds, ContentMask, DecorationRun, DevicePixels, FontId, GlyphId, Hsla,
     IsZero, MonochromeSprite, Pixels, Point, RenderGlyphParams, SUBPIXEL_VARIANTS_X,
-    SUBPIXEL_VARIANTS_Y, ScaledPixels, Size, SubpixelSprite, TransformationMatrix, Window,
-    util::round_half_toward_zero,
+    SUBPIXEL_VARIANTS_Y, ScaledPixels, ShapedLine, Size, SubpixelSprite, TextAlign,
+    TransformationMatrix, Window, black, point, px, size, util::round_half_toward_zero,
 };
 use anyhow::Result;
 use std::borrow::Cow;
@@ -249,6 +249,47 @@ impl Window {
     }
 }
 
+/// [`Window::paint_glyph`], for a glyph an element paints on its own rather
+/// than through a line: text an element positions itself, as a canvas scaling
+/// shaped text does a glyph at a time. Such glyphs come in runs all the same,
+/// so the rendering worked out for one is kept for the next in the same font,
+/// size and color, and each is then painted as a line's glyphs are, with its
+/// raster bounds and tile kept by the window. Upstream asks the platform
+/// window how it is drawn, and the text system and the atlas where the glyph
+/// is, for every glyph.
+///
+/// The rendering kept is the window's for the frame being painted, which
+/// takes its background and its text rendering mode as they are at the first
+/// glyph of a run.
+pub(crate) fn paint_glyph(
+    window: &mut Window,
+    origin: Point<Pixels>,
+    font_id: FontId,
+    glyph_id: GlyphId,
+    font_size: Pixels,
+    color: Hsla,
+) -> Result<()> {
+    let run = (window.fast_glyph_bounds.frame, font_id, font_size, color);
+    let rendering = match window.fast_glyph_bounds.run_rendering {
+        Some((kept, rendering)) if kept == run => rendering,
+        _ => {
+            let rendering = window.glyph_run_rendering(font_id, font_size, color);
+            window.fast_glyph_bounds.run_rendering = Some((run, rendering));
+            rendering
+        }
+    };
+    let content_mask = window.snapped_content_mask();
+    window.paint_glyph_in_run(
+        origin,
+        font_id,
+        glyph_id,
+        font_size,
+        color,
+        rendering,
+        content_mask,
+    )
+}
+
 /// Paints the glyphs of a line, working out what they share once rather than
 /// once a glyph: the content mask, which nothing painted along a line
 /// changes, snapped for its sprites and pushed out by each run's glyph reach
@@ -339,6 +380,99 @@ impl LineGlyphPainter {
     }
 }
 
+impl ShapedLine {
+    /// Paints the line's glyphs scaled by `scale`, for text drawn on a
+    /// zoomable surface: a line shaped once, at the size it has unscaled,
+    /// keeps its layout at every zoom, so each glyph moves to its scaled
+    /// place instead of the line being shaped again at every size a zoom
+    /// passes through, and jumping between their widths.
+    ///
+    /// `origin`, `line_height` and `align_width` are where the scaled line
+    /// goes in the window, as [`ShapedLine::paint`] takes them. Glyphs are
+    /// rasterized at the scaled font size rounded to a quarter of a pixel,
+    /// which bounds how many sizes a continuous zoom adds to the atlas.
+    ///
+    /// Only glyphs are painted, in their runs' colors: no backgrounds,
+    /// underlines or strikethroughs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_glyphs_scaled(
+        &self,
+        origin: Point<Pixels>,
+        line_height: Pixels,
+        align: TextAlign,
+        align_width: Option<Pixels>,
+        scale: f32,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<()> {
+        let layout = &self.layout;
+        let font_size = px((layout.font_size.0 * scale * 4.).round() / 4.);
+        let width = layout.width * scale;
+        let left = origin.x
+            + match align {
+                TextAlign::Left => px(0.),
+                TextAlign::Center => (align_width.unwrap_or(width) - width) / 2.,
+                TextAlign::Right => align_width.unwrap_or(width) - width,
+            };
+        // Where `paint` puts the baseline, with the line's metrics scaled.
+        let baseline_offset =
+            (line_height - (layout.ascent + layout.descent) * scale) / 2. + layout.ascent * scale;
+        let line_bounds = Bounds::new(point(left, origin.y), size(width, line_height));
+        window.paint_layer(line_bounds, |window| {
+            let mask = window.content_mask().bounds;
+            let mut glyph_painter = LineGlyphPainter::new(window);
+            let mut decoration_runs = self.decoration_runs.iter();
+            let mut run_end = 0;
+            let mut color = black();
+            for run in &layout.runs {
+                let max_glyph_size = bounding_box(window, cx, run.font_id, font_size).size;
+                for glyph in &run.glyphs {
+                    if glyph.index >= run_end {
+                        // As `paint` does, skipping the runs of a part of a glyph.
+                        let mut decoration_run = decoration_runs.next();
+                        while let Some(run) = decoration_run {
+                            if glyph.index < run_end + run.len as usize {
+                                break;
+                            }
+                            run_end += run.len as usize;
+                            decoration_run = decoration_runs.next();
+                        }
+                        match decoration_run {
+                            Some(run) => {
+                                run_end += run.len as usize;
+                                color = run.color;
+                            }
+                            None => run_end = layout.len,
+                        }
+                    }
+                    let line_glyph = Bounds::new(
+                        point(left + glyph.position.x * scale, origin.y),
+                        max_glyph_size,
+                    );
+                    let baseline = baseline_offset + glyph.position.y * scale;
+                    if !glyph_painter.may_reach(line_glyph, baseline, &mask) {
+                        continue;
+                    }
+                    let glyph_origin = point(line_glyph.origin.x, origin.y + baseline);
+                    if glyph.is_emoji {
+                        window.paint_emoji(glyph_origin, run.font_id, glyph.id, font_size)?;
+                    } else {
+                        glyph_painter.paint_glyph(
+                            window,
+                            glyph_origin,
+                            run.font_id,
+                            glyph.id,
+                            font_size,
+                            color,
+                        )?;
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
 /// How many glyphs' raster bounds a window keeps at hand, as a power of two.
 /// See [`GlyphBoundsCache`].
 const GLYPH_BOUNDS_SLOT_BITS: u32 = 12;
@@ -359,13 +493,18 @@ const GLYPH_BOUNDS_SLOT_BITS: u32 = 12;
 /// while a frame is painted.
 ///
 /// The bounding boxes of the fonts lines were painted in lately, at the sizes
-/// they were painted at, are kept here too. See [`bounding_box`].
+/// they were painted at, are kept here too. See [`bounding_box`]. So is the
+/// rendering of the run the last glyph painted on its own was in. See
+/// [`paint_glyph`].
 pub(crate) struct GlyphBoundsCache {
     slots: Box<[Option<GlyphSlot>]>,
     /// Counts the frames the window finished painting, telling a tile looked
     /// up in this one from one looked up before.
     frame: u64,
     bounding_boxes: Vec<(FontId, Pixels, Bounds<Pixels>)>,
+    /// The frame, font, size and color of the last glyph [`paint_glyph`]
+    /// painted, and the rendering worked out for it.
+    run_rendering: Option<((u64, FontId, Pixels, Hsla), GlyphRunRendering)>,
 }
 
 /// What [`GlyphBoundsCache`] keeps of a glyph.
@@ -384,6 +523,7 @@ impl Default for GlyphBoundsCache {
             slots: vec![None; 1 << GLYPH_BOUNDS_SLOT_BITS].into_boxed_slice(),
             frame: 0,
             bounding_boxes: Vec::new(),
+            run_rendering: None,
         }
     }
 }
