@@ -842,8 +842,6 @@ impl TaffyLayoutEngine {
         let measure = move |known, available, window: &mut Window, cx: &mut App| {
             measure(&state, known, available, window, cx)
         };
-        let log = Rc::<MeasureLog>::default();
-        let measure = MeasureLog::logged(&log, measure);
         // Measured afresh: what the last element measured was forgotten, and
         // measuring under its constraints again would put it back.
         let id = request_measured_node(
@@ -859,7 +857,6 @@ impl TaffyLayoutEngine {
             && node.id == id
         {
             node.measurement = Some(memo);
-            node.measure_log = Some(log);
         }
         id
     }
