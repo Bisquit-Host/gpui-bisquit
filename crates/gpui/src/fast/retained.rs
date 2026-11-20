@@ -1112,6 +1112,14 @@ impl Window {
             .finish_recording_claimed_keys(start)
     }
 
+    /// See [`crate::taffy::TaffyLayoutEngine::close_recording_claimed_keys`].
+    pub(crate) fn close_recording_claimed_layout_keys(&mut self) {
+        self.layout_engine
+            .as_mut()
+            .unwrap()
+            .close_recording_claimed_keys()
+    }
+
     /// See [`crate::taffy::TaffyLayoutEngine::keep_retained`].
     pub(crate) fn keep_retained_layout(&mut self, keys: &[u64]) {
         self.layout_engine.as_mut().unwrap().keep_retained(keys);

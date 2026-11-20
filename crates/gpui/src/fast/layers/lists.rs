@@ -1578,8 +1578,8 @@ fn finish_prepaint(window: &mut Window, cx: &mut App, id: &GlobalElementId) {
         return;
     };
     frame.prepaint_range = frame.prepaint_start.clone()..end;
-    if let Some((start, _)) = frame.layout_keys.take() {
-        window.finish_recording_claimed_layout_keys(start);
+    if frame.layout_keys.take().is_some() {
+        window.close_recording_claimed_layout_keys();
     }
     let Some(frame) = frame_mut(window, id) else {
         return;

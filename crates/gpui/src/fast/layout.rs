@@ -427,13 +427,18 @@ impl TaffyLayoutEngine {
 
     /// Ends the recording started at `start`, returning the keys it saw.
     pub(crate) fn finish_recording_claimed_keys(&mut self, start: usize) -> Vec<u64> {
+        let keys = self.retention.claimed_key_log[start..].to_vec();
+        self.close_recording_claimed_keys();
+        keys
+    }
+
+    /// Ends the innermost open recording without collecting what it saw.
+    pub(crate) fn close_recording_claimed_keys(&mut self) {
         let retention = &mut self.retention;
-        let keys = retention.claimed_key_log[start..].to_vec();
         retention.open_key_recordings -= 1;
         if retention.open_key_recordings == 0 {
             retention.claimed_key_log.clear();
         }
-        keys
     }
 
     /// Keeps the nodes retained under `keys` for another frame without
