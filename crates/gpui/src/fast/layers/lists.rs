@@ -56,7 +56,7 @@ use crate::{
             policy::{self, Decision},
             record::LayerRecord,
             reuse,
-            scene::{LayerContent, LayerPart, move_primitive},
+            scene::{LayerContent, LayerPart, move_primitive, visible_bounds},
             tiles::{combine_tile_hashes, dirty_tiles, part_tile_hashes},
         },
     },
@@ -245,7 +245,7 @@ struct Row {
     overlay: Rc<[Primitive]>,
     /// Everything the row drew, the overlay included, when it has one: what
     /// drawing the row into the frame draws.
-    whole: Option<Rc<Scene>>,
+    whole: Option<LayerPart>,
     /// The layer's translation when the row was painted: its hitboxes, and
     /// the positions its closures and element states hold, are window
     /// positions at it.
@@ -1653,14 +1653,27 @@ fn drawn_alike(a: &Row, b: &Row) -> bool {
 impl Row {
     /// The part drawing everything the row drew, overlay included.
     fn whole_part(&self) -> LayerPart {
-        match &self.whole {
-            Some(whole) => LayerPart {
-                bounds: None,
-                scene: whole.clone(),
-            },
-            None => self.part.clone(),
-        }
+        self.whole.as_ref().unwrap_or(&self.part).clone()
     }
+}
+
+/// Where the primitives of `operations` can draw, a path's antialiased edge
+/// included: a row with paths out of view is passed over as one without is,
+/// rather than having its paths moved and clipped on every frame to draw
+/// nothing.
+fn reach_of(operations: &[PaintOperation]) -> Bounds<ScaledPixels> {
+    operations
+        .iter()
+        .filter_map(|operation| match operation {
+            PaintOperation::Primitive(primitive) => {
+                let visible = visible_bounds(primitive);
+                (visible.size.width.0 > 0. && visible.size.height.0 > 0.)
+                    .then(|| crate::fast::layers::overlay::reach(primitive))
+            }
+            _ => None,
+        })
+        .reduce(|reach, other| reach.union(&other))
+        .unwrap_or_default()
 }
 
 /// The parts of `range` outside every one of `spans`.
@@ -2853,9 +2866,14 @@ pub(crate) fn end_paint_rows(window: &mut Window, cx: &mut App, id: Option<&Glob
         let (row_operations, overlay, whole) =
             match crate::fast::layers::overlay::split(&row_operations) {
                 Some((tiles, overlay)) => {
-                    let mut whole = Scene::default();
-                    whole.paint_operations = row_operations;
-                    (tiles, Rc::from(overlay), Some(Rc::new(whole)))
+                    let bounds = Some(reach_of(&row_operations));
+                    let mut scene = Scene::default();
+                    scene.paint_operations = row_operations;
+                    let whole = LayerPart {
+                        bounds,
+                        scene: Rc::new(scene),
+                    };
+                    (tiles, Rc::from(overlay), Some(whole))
                 }
                 None => (row_operations, Rc::from([]), None),
             };
