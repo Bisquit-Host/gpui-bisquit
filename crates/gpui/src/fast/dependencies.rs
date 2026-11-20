@@ -526,6 +526,16 @@ impl App {
             || self.globals_or_states_changed(dependencies)
     }
 
+    /// Whether one of the entities in `dependencies` was updated since they
+    /// were recorded, notified or not: the part of
+    /// [`Self::dependencies_changed`] that counts only `inside_notified`, for
+    /// a caller to find out whether it is before working that out.
+    pub(crate) fn dependencies_updated(&self, dependencies: &RenderDependencies) -> bool {
+        self.entities
+            .access_log
+            .updated_since(&dependencies.entities, dependencies.updates)
+    }
+
     /// Whether anything in `dependencies`, read by a cached view
     /// ([`crate::Entity::cached`]) or a view drawn inside one, changed in a
     /// way that draws the cached view again: one of the entities was
@@ -642,6 +652,16 @@ impl EntityAccessLog {
         generation != self.update_generation
             && entities.iter().any(|entity| {
                 after(&self.changed_at, entity) || (updates && after(&self.updated_at, entity))
+            })
+    }
+
+    /// Whether any of `entities` was updated after `generation`.
+    fn updated_since(&self, entities: &[EntityId], generation: u64) -> bool {
+        generation != self.update_generation
+            && entities.iter().any(|entity| {
+                self.updated_at
+                    .get(entity)
+                    .is_some_and(|at| *at > generation)
             })
     }
 

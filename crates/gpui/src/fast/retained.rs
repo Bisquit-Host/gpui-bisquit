@@ -1170,14 +1170,19 @@ impl Window {
                 cached.push(index + record.nested);
                 continue;
             }
-            let inside_notified = !notified.is_empty()
-                && self
-                    .rendered_frame
-                    .dispatch_tree
-                    .view_path_reversed(entity)
-                    .any(|view| notified.contains(&view));
-            if !cx.dependencies_changed(&record.own_dependencies, inside_notified)
+            // Walking up the views around this one is left for the view an
+            // update alone could have changed: most frames have none.
+            let inside_notified = || {
+                !notified.is_empty()
+                    && self
+                        .rendered_frame
+                        .dispatch_tree
+                        .view_path_reversed(entity)
+                        .any(|view| notified.contains(&view))
+            };
+            if !cx.dependencies_changed(&record.own_dependencies, false)
                 && !changed_alone()
+                && !(cx.dependencies_updated(&record.own_dependencies) && inside_notified())
             {
                 continue;
             }
