@@ -250,6 +250,7 @@ struct ImgState {
     frame_index: usize,
     last_frame_time: Option<Instant>,
     started_loading: Option<(Instant, Task<()>)>,
+    fast_wake: crate::fast::misc::animated_image::FrameWake,
 }
 
 /// The image layout state between frames
@@ -288,6 +289,7 @@ impl Element for Img {
                     frame_index: 0,
                     last_frame_time: None,
                     started_loading: None,
+                    fast_wake: crate::fast::misc::animated_image::FrameWake::default(),
                 })
             });
 
@@ -380,7 +382,13 @@ impl Element for Img {
                                 && window.is_window_active()
                                 && !cx.reduce_motion()
                             {
-                                window.request_animation_frame();
+                                crate::fast::misc::animated_image::request_frame(
+                                    state.as_ref().map(|state| &state.fast_wake),
+                                    state.as_ref().and_then(|state| state.last_frame_time),
+                                    Duration::from(data.delay(frame_index)),
+                                    window,
+                                    cx,
+                                );
                             }
                         }
                         Some(_err) => {
