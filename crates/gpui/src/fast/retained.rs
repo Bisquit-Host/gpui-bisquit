@@ -970,7 +970,8 @@ impl Window {
                     self,
                     id,
                     layout,
-                    layout_dependencies.all.union(&dependencies.all),
+                    &layout_dependencies.all,
+                    &dependencies.all,
                 );
             }
             return None;

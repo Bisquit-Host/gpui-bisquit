@@ -366,18 +366,22 @@ pub(crate) struct KeptLayout {
 
 /// Keeps how the view `id`, prepainted inside the content of the layer being
 /// painted, was laid out, and what laying it out and prepainting it read.
+/// A list's rows keep their views themselves, so nothing is kept for one.
 pub(crate) fn keep_view_layout(
     window: &mut Window,
     id: GlobalElementId,
     layout: Rc<RetainedLayout>,
-    dependencies: RenderDependencies,
+    layout_dependencies: &RenderDependencies,
+    prepaint_dependencies: &RenderDependencies,
 ) {
-    if let Some(painting) = window.fast_layers.painting.as_mut() {
+    if let Some(painting) = window.fast_layers.painting.as_mut()
+        && painting.input.list_region.is_none()
+    {
         painting.view_layouts.insert(
             id,
             KeptLayout {
                 layout,
-                dependencies,
+                dependencies: layout_dependencies.union(prepaint_dependencies),
             },
         );
     }
