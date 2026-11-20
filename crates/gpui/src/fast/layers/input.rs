@@ -16,7 +16,7 @@ use crate::{
 };
 use collections::FxHashMap;
 use std::{
-    cell::{Cell, RefCell},
+    cell::{Cell, OnceCell, RefCell},
     rc::{Rc, Weak},
 };
 
@@ -170,16 +170,9 @@ pub(crate) fn before_dispatch(window: &mut Window, cx: &mut App, event: &Platfor
     if !COMPILED || window.fast_layers.layers.is_empty() {
         return;
     }
-    // The element a move lands on, as last frame hit tested it.
-    let moved_onto = match event {
-        PlatformInput::MouseMove(event) => window
-            .rendered_frame
-            .hit_test(event.position)
-            .ids
-            .first()
-            .copied(),
-        _ => None,
-    };
+    // The element a move lands on, as last frame hit tested it. Hit tested
+    // only once a stale layer asks: most moves find none.
+    let moved_onto = OnceCell::new();
     let reaches: &dyn Fn(&Window, &Layer) -> bool = match event {
         PlatformInput::Scroll(_) => return,
         PlatformInput::KeyDown(_)
@@ -191,7 +184,15 @@ pub(crate) fn before_dispatch(window: &mut Window, cx: &mut App, event: &Platfor
         // content — are hit tested against the content's translated
         // hitboxes, which is all its hover handling needs, and must not
         // rebuild it on every frame of the drag.
-        PlatformInput::MouseMove(_) => &|_, layer| {
+        PlatformInput::MouseMove(event) => &|window, layer| {
+            let moved_onto = *moved_onto.get_or_init(|| {
+                window
+                    .rendered_frame
+                    .hit_test(event.position)
+                    .ids
+                    .first()
+                    .copied()
+            });
             moved_onto.is_some_and(|id| {
                 layer.input.hitboxes.iter().any(|hitbox| hitbox.id == id)
                     || layer.rows.holds_hitbox(id)
