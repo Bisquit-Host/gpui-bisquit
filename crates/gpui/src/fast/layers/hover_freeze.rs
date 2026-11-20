@@ -50,6 +50,9 @@ pub(crate) struct HoverFreeze {
     enabled: bool,
     /// The hover listeners that last heard `true`.
     hovered: Vec<HoveredListener>,
+    /// Whether the task [`note_wheel`] starts is waiting to draw the window
+    /// again once hover is no longer held still.
+    thaw_pending: bool,
 }
 
 /// Where the fingers of a trackpad swipe are, as its wheel events tell.
@@ -199,12 +202,14 @@ impl Default for HoverFreeze {
             fingers: Fingers::default(),
             enabled: !cfg!(test),
             hovered: Vec::new(),
+            thaw_pending: false,
         }
     }
 }
 
 /// Notes a wheel event at the pointer's position, and draws the window again
-/// once hover is no longer held still for it.
+/// once hover is no longer held still for it. One task waits for that however
+/// many wheel events come: a trackpad sends several a frame.
 pub(crate) fn note_wheel(window: &mut Window, cx: &mut App, event: &ScrollEvent) {
     let freeze = &mut window.fast_layers.hover_freeze;
     if !freeze.enabled {
@@ -212,17 +217,34 @@ pub(crate) fn note_wheel(window: &mut Window, cx: &mut App, event: &ScrollEvent)
     }
     freeze.last_wheel = Some((Instant::now(), window.mouse_position));
     freeze.fingers = freeze.fingers.after(event.touch_phase, event.delta);
+    if std::mem::replace(&mut freeze.thaw_pending, true) {
+        return;
+    }
     window
         .spawn(cx, async move |cx| {
-            cx.background_executor()
-                .timer(HOVER_FREEZE + Duration::from_millis(10))
-                .await;
-            cx.update(|window, _| {
-                if !frozen(window) {
-                    window.refresh();
+            let margin = Duration::from_millis(10);
+            let mut wait = HOVER_FREEZE + margin;
+            loop {
+                cx.background_executor().timer(wait).await;
+                let remaining = cx.update(|window, _| {
+                    let freeze = &mut window.fast_layers.hover_freeze;
+                    let since_wheel = freeze.last_wheel.map(|(at, _)| at.elapsed());
+                    if let Some(since_wheel) = since_wheel
+                        && since_wheel < HOVER_FREEZE
+                    {
+                        return Some(HOVER_FREEZE - since_wheel + margin);
+                    }
+                    freeze.thaw_pending = false;
+                    if !frozen(window) {
+                        window.refresh();
+                    }
+                    None
+                });
+                match remaining {
+                    Ok(Some(remaining)) => wait = remaining,
+                    _ => break,
                 }
-            })
-            .ok();
+            }
         })
         .detach();
 }
@@ -284,20 +306,24 @@ impl HoverFreeze {
 mod tests {
     use super::{HOVER_FREEZE, frozen};
     use crate::{
-        Context, IntoElement, MouseMoveEvent, PlatformInput, Render, ScrollDelta, ScrollEvent,
-        Styled as _, TestAppContext, TouchPhase, Window, WindowHandle, div, point, px,
+        AppContext as _, Context, IntoElement, MouseMoveEvent, PlatformInput, Render, ScrollDelta,
+        ScrollEvent, Styled as _, TestAppContext, TouchPhase, Window, WindowHandle, div, point, px,
     };
 
-    struct Page;
+    #[derive(Default)]
+    struct Page {
+        renders: usize,
+    }
 
     impl Render for Page {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.renders += 1;
             div().size_full()
         }
     }
 
     fn open(cx: &mut TestAppContext) -> WindowHandle<Page> {
-        let window = cx.add_window(|_, _| Page);
+        let window = cx.add_window(|_, _| Page::default());
         window
             .update(cx, |_, window, _| window.set_hover_freeze(true))
             .unwrap();
@@ -383,5 +409,31 @@ mod tests {
             })
             .unwrap();
         assert!(!window.update(cx, |_, window, _| frozen(window)).unwrap());
+    }
+
+    #[crate::test]
+    fn one_wait_draws_the_window_again_after_the_last_wheel_event(cx: &mut TestAppContext) {
+        let window = open(cx);
+        // Whether the wait is on, and how often the window has been drawn anew.
+        let state = |cx: &mut TestAppContext| {
+            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+                .unwrap();
+            window
+                .update(cx, |page, window, _| {
+                    let waiting = window.fast_layers.hover_freeze.thaw_pending;
+                    (waiting, page.renders)
+                })
+                .unwrap()
+        };
+        let (_, renders) = state(cx);
+        for _ in 0..4 {
+            wheel(cx, window, TouchPhase::Moved, -40.);
+        }
+        assert_eq!(state(cx), (true, renders), "waiting, hover held still");
+
+        assert!(!held_after_a_pause(cx, window));
+        cx.executor().advance_clock(HOVER_FREEZE * 2);
+        cx.run_until_parked();
+        assert_eq!(state(cx), (false, renders + 1), "drawn anew once");
     }
 }
