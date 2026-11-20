@@ -26,15 +26,15 @@ pub(crate) fn record_entities_accessed(
 ) {
     let window_id = window_handle.id;
     let mut tracked_entities = std::mem::take(cx.tracked_entities.entry(window_id).or_default());
-    for entity in tracked_entities.iter() {
-        if !entities.contains(entity)
-            && let Some(windows) = cx.window_invalidators_by_entity.get_mut(entity)
-        {
+    tracked_entities.retain(|entity| {
+        let drawn = entities.contains(entity);
+        if !drawn && let Some(windows) = cx.window_invalidators_by_entity.get_mut(entity) {
             windows.remove(&window_id);
         }
-    }
+        drawn
+    });
     for entity in entities.iter() {
-        if !tracked_entities.contains(entity) {
+        if tracked_entities.insert(*entity) {
             cx.window_invalidators_by_entity
                 .entry(*entity)
                 .or_default()
@@ -42,7 +42,5 @@ pub(crate) fn record_entities_accessed(
         }
         cx.current_window_by_entity.insert(*entity, window_id);
     }
-    tracked_entities.clear();
-    tracked_entities.extend(entities.iter().copied());
     cx.tracked_entities.insert(window_id, tracked_entities);
 }
