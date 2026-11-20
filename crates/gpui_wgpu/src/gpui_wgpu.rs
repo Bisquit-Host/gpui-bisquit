@@ -12,6 +12,8 @@ mod wgpu_renderer;
 pub use backdrop::backdrop_group_starts;
 pub use cosmic_text_system::*;
 pub use fast::dynamic_textures::WgpuDynamicTexture;
+#[cfg(not(target_family = "wasm"))]
+pub use fast::wgpu_context::wgpu_context;
 pub use pipeline_cache::set_pipeline_cache_dir;
 pub use wgpu;
 pub use wgpu_atlas::*;

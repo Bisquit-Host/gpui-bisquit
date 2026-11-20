@@ -13,8 +13,8 @@ and the pinned upstream revisions.
 
 `crates` holds `gpui`, `gpui_wgpu`, `gpui_apple` and
 `gpui_macos` from [gpui-fast](https://github.com/longbridge/gpui-fast) commit
-`80be50164adaf4db69eaf4a25037f20b6f447835`, which imports Zed's GPUI at
-`d2a4fb6ded7c470be25d1541281da3882495b65b` and adds retained views, retained
+`b533574510496ab3619204b57f8b8e0487238d9b`, which imports Zed's GPUI at
+`78f5d7446c55f6c1aa9b66e8111f6b3f4625ebb0` and adds retained views, retained
 layout and scroll layers. Examples, external tests and benches are omitted;
 their manifest targets and dev dependencies are removed. The nested workspace
 resolves inherited dependencies against gpui-fast's root manifest, replacing
@@ -26,6 +26,31 @@ Retained views and scroll layers can be turned off at runtime with
 `GPUI_VIEW_RETENTION=0` and `GPUI_SCROLL_LAYERS=0`, to tell a stale view
 from a renderer problem. Scroll layers are compiled for macOS, Linux and
 Windows only; Android draws retained views without them.
+
+### Merge of gpui-fast b533574 (2026-11-20)
+
+Merged from `80be501` with `git merge`: 16 gpui-fast changes and its sync with
+Zed `78f5d74`. Eight files conflicted.
+
+- `gpui_macos/src/window.rs`: gpui-fast now pauses a Metal display link while a
+  window is occluded instead of detaching it
+  (`fast::display_link_lifecycle`). Our delayed GPU release drops the layer
+  that link is bound to, so the release detaches the link first, and a window
+  whose layer was recreated starts a new link instead of resuming the old one.
+- `gpui_wgpu/src/wgpu_context.rs`: our WebGL2 limits for Android GLES are
+  dropped for `fast::native_gl::required_limits`, which requests the adapter's
+  own limits when it lacks compute. Android GLES still always uses texture
+  instance data; other native GL adapters do when they lack vertex storage.
+- `gpui_wgpu/src/cosmic_text_system.rs`: our rule stays (any face with a glyph
+  loads); a known emoji font skips the charmap walk through
+  `fast::emoji_fonts`.
+- `gpui_wgpu/src/wgpu_renderer.rs`: our surface creation with the Android GL
+  fallback notes the context for `fast::wgpu_context`, and a frame clears
+  dynamic texture uploads before `fast::path_targets::prepare`.
+- `gpui/src/window.rs`: the frame's hit test goes through `fast::pointer`, next
+  to our touch-pressed hitbox.
+- `fast/misc/mod.rs`, `gpui_wgpu.rs` and `script/upstream-allowlist` list both
+  sides.
 
 ### Merge of gpui-fast 80be501 (2026-11-15)
 

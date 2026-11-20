@@ -481,12 +481,8 @@ impl WgpuContext {
         }
 
         let color_atlas_texture_format = Self::select_color_texture_format(adapter)?;
-        // Native GLES 3.0 uses the same texture transport as WebGL2 and has no
-        // compute capability. Requiring downlevel compute limits rejects Apple's
-        // host-accelerated Android emulator even though these pipelines need none.
-        let texture_instances = adapter.get_info().backend == wgpu::Backend::Gl
-            && (cfg!(target_family = "wasm") || cfg!(target_os = "android"));
-        let required_limits = if texture_instances {
+        #[cfg(target_family = "wasm")]
+        let required_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
             wgpu::Limits::downlevel_webgl2_defaults()
                 .using_resolution(adapter.limits())
                 .using_alignment(adapter.limits())
@@ -495,6 +491,8 @@ impl WgpuContext {
                 .using_resolution(adapter.limits())
                 .using_alignment(adapter.limits())
         };
+        #[cfg(not(target_family = "wasm"))]
+        let required_limits = crate::fast::native_gl::required_limits(adapter);
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -796,9 +794,10 @@ impl WgpuContext {
 
     pub fn uses_webgl_instance_data(&self) -> bool {
         // Android GLES has the same storage-buffer alignment limits as WebGL2.
-        matches!(self.backend, WgpuBackend::Gl)
+        matches!(self.backend, WgpuBackend::Gl) && cfg!(target_family = "wasm")
             || (cfg!(target_os = "android")
                 && matches!(self.backend, WgpuBackend::Native(wgpu::Backend::Gl)))
+            || crate::fast::native_gl::uses_texture_instance_data(&self.adapter)
     }
 
     pub fn supports_dual_source_blending(&self) -> bool {

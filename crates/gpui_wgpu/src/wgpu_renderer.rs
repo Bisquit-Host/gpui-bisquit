@@ -503,6 +503,7 @@ impl WgpuRenderer {
             .borrow()
             .as_ref()
             .map(|ctx| ctx.instance.clone());
+        crate::fast::wgpu_context::note_gpu_context(&gpu_context);
         let mut ctx_ref = gpu_context.borrow_mut();
         let surface_configured = existing.is_none();
         let (context, surface) = match existing {
@@ -694,6 +695,8 @@ impl WgpuRenderer {
         let surface_format = surface_config.format;
         let alpha_mode = surface_config.alpha_mode;
         let max_texture_size = context.device.limits().max_texture_dimension_2d;
+        #[cfg(not(target_family = "wasm"))]
+        crate::fast::dynamic_textures::init(context);
         let core = WgpuRendererCore::new(context, atlas.clone(), surface_format, alpha_mode);
 
         Ok(Self {
@@ -1461,6 +1464,7 @@ impl WgpuRendererCore {
         );
 
         self.atlas.before_frame();
+        crate::fast::dynamic_textures::TextureStore::before_frame(&self.fast_dynamic_textures);
         crate::fast::path_targets::prepare(self, scene, size);
 
         let gamma_params = GammaParams {
@@ -2303,6 +2307,7 @@ impl WgpuRenderer {
             // Drop old resources to release Arc<Device>/Arc<Queue> and GPU resources
             self.state = RendererState::Released;
             *gpu_context.borrow_mut() = None;
+            crate::fast::dynamic_textures::release_lost_device();
 
             // Wait briefly for the GPU driver to stabilize, then try to
             // recreate the context without software renderers. If this fails
@@ -2332,6 +2337,7 @@ impl WgpuRenderer {
 
         self.state = RendererState::Released;
         self.atlas.handle_device_lost(context);
+        crate::fast::dynamic_textures::handle_device_lost(context);
 
         let is_bgr = self.is_bgr;
         *self = Self::new_internal(
@@ -2390,6 +2396,7 @@ pub struct WgpuHeadlessRenderer {
 impl WgpuHeadlessRenderer {
     pub fn new() -> anyhow::Result<Self> {
         let (context, target_format) = WgpuContext::new_headless()?;
+        crate::fast::dynamic_textures::init(&context);
         // The device may be shared with earlier renderers; observe only errors raised from
         // here on, including any while this renderer builds its pipelines.
         let observed_error_generation = context.errors().current_generation();

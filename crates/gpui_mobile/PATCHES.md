@@ -6,7 +6,7 @@ and licenses are included. The root dependency still records the git revision;
 Cargo's source patch selects this copy.
 
 GPUI and its wgpu renderer use gpui-fast commit
-`80be50164adaf4db69eaf4a25037f20b6f447835`, shared with desktop through the
+`b533574510496ab3619204b57f8b8e0487238d9b`, shared with desktop through the
 root git-source patch. `gpui-mobile`'s manifest names the same source and revision. The vendored source is in `crates`.
 See [README.md](../../PATCHES.md) for the full renderer patch port inventory.
 
@@ -28,7 +28,8 @@ No global registry files or read-only source clones were modified.
 
 Workspace additions:
 
-- Native GLES requests WebGL2/downlevel limits, including zero compute limits.
+- Native GLES requests the adapter's own limits when it lacks compute, through
+  gpui-fast's `fast::native_gl::required_limits`.
   The native GL pipelines already use the texture transport from the spike.
 - The optional native-gles-only feature creates only a GLES instance. Together
   with emulator -gpu host -feature -Vulkan, this prevents the emulator's Vulkan
