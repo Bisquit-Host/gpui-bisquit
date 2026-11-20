@@ -431,6 +431,9 @@ fn measure_text(
 
     let runs = inputs.runs();
     let runs = &*runs;
+    // The lines as they are shaped to tell whether they fit, when that is
+    // how they are laid out: shaping them again only builds them twice.
+    let mut fitting = None;
     let (text, runs) = if let Some(truncate_width) = truncate_width {
         let (truncation_affix, truncate_from) = match text_style.text_overflow.clone() {
             Some(TextOverflow::Truncate(affix)) => (affix, TruncateFrom::End),
@@ -438,11 +441,12 @@ fn measure_text(
             Some(TextOverflow::TruncateMiddle(affix)) => (affix, TruncateFrom::Middle),
             None => (SharedString::default(), TruncateFrom::End),
         };
-        let mut line_wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
+        // Taken only to truncate: text that fits needs none.
+        let line_wrapper = || cx.text_system().line_wrapper(text_style.font(), font_size);
         if let Some(max_lines) = text_style.line_clamp
             && let Some(wrap_width) = wrap_width
         {
-            let truncated = line_wrapper.truncate_wrapped_line(
+            let truncated = line_wrapper().truncate_wrapped_line(
                 text.clone(),
                 wrap_width,
                 max_lines,
@@ -474,11 +478,14 @@ fn measure_text(
         {
             // Truncation sums per-character advances, which can be more than
             // the shaped width, so text that fits once shaped is not truncated.
+            if wrap_width.is_none() && text_style.line_clamp.is_none() {
+                fitting = Some(unclipped);
+            }
             (text.clone(), Cow::Borrowed(runs))
         } else {
             // The sum can also be less than the shaped width, so what it cuts
             // is fitted to the shaped width.
-            let truncated = line_wrapper.truncate_line(
+            let truncated = line_wrapper().truncate_line(
                 text.clone(),
                 truncate_width,
                 &truncation_affix,
@@ -501,11 +508,13 @@ fn measure_text(
     };
     let len = text.len();
 
-    let Some(lines) = window
-        .text_system()
-        .shape_text(text, font_size, &runs, wrap_width, text_style.line_clamp)
-        .log_err()
-    else {
+    let lines = fitting.or_else(|| {
+        window
+            .text_system()
+            .shape_text(text, font_size, &runs, wrap_width, text_style.line_clamp)
+            .log_err()
+    });
+    let Some(lines) = lines else {
         layout.0.borrow_mut().replace(TextLayoutInner {
             lines: Default::default(),
             len: 0,
