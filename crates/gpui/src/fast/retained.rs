@@ -1235,16 +1235,11 @@ pub(crate) fn reuse_paint_records(window: &mut Window, range: &Range<PaintIndex>
     crate::fast::a11y::reuse_paint(window, range);
 }
 
-/// The retained subtrees around the element being painted, for a listener
-/// to mark if what it listens for changes the element's look.
+/// The innermost retained subtree around the element being painted, for a
+/// listener to mark if what it listens for changes the element's look.
 #[inline(always)]
-pub(crate) fn enclosing_retained_subtrees(window: &Window) -> SmallVec<[GlobalElementId; 2]> {
-    window
-        .retained_state
-        .subtree_stack
-        .iter()
-        .cloned()
-        .collect()
+pub(crate) fn enclosing_retained_subtrees(window: &Window) -> Option<GlobalElementId> {
+    window.retained_state.subtree_stack.last().cloned()
 }
 
 /// Notes that what is being painted inside a retained subtree looks the
@@ -1267,17 +1262,14 @@ pub(crate) fn note_hover_read(window: &Window, hitbox: HitboxId) -> Option<bool>
     Some(hovered)
 }
 
-/// Marks the innermost of the retained subtrees an interaction happened
-/// in to be built again rather than reused on the next frame. Its
-/// listener notifies the view it is in, which marks the views around it
-/// dirty, so they are drawn from last frame around it where they can be
-/// rather than built again.
+/// Marks the retained subtree an interaction happened in, the innermost
+/// around its listener, to be built again rather than reused on the next
+/// frame. Its listener notifies the view it is in, which marks the views
+/// around it dirty, so they are drawn from last frame around it where they
+/// can be rather than built again.
 #[inline(always)]
-pub(crate) fn invalidate_retained_subtrees(window: &mut Window, subtrees: &[GlobalElementId]) {
-    window
-        .retained_state
-        .dirty_subtrees
-        .extend(subtrees.last().cloned());
+pub(crate) fn invalidate_retained_subtrees(window: &mut Window, subtree: &Option<GlobalElementId>) {
+    window.retained_state.dirty_subtrees.extend(subtree.clone());
 }
 
 /// Starts prepainting the deferred draw at `deferred_draw_ix` as a part of
