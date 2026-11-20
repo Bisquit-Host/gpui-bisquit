@@ -50,6 +50,14 @@ pub(crate) struct LayoutRetention {
     /// matches the size of `retained` at the end of the frame, nothing has been
     /// orphaned and the sweep can be skipped entirely.
     claimed_this_frame: usize,
+    /// How many nodes the last sweep kept unclaimed because they linger (see
+    /// [`RetainedNode::lingers`]) and have not been claimed since. While
+    /// these are the only unclaimed nodes and none is due, there is nothing
+    /// to sweep either: a row scrolled out of view would otherwise have every
+    /// frame walk the whole table until it is released.
+    waiting: usize,
+    /// The first frame one of the `waiting` nodes is released in.
+    waiting_until: u64,
     /// The keys claimed while [`TaffyLayoutEngine::record_claimed_keys`] is
     /// recording, for a retained subtree to keep its nodes by. See
     /// [`crate::fast::retained`].
@@ -248,6 +256,14 @@ struct RetainedNode {
     lingers: bool,
 }
 
+impl RetainedNode {
+    /// Whether the node, about to be claimed in `frame`, went the frame
+    /// before unclaimed, and so is one [`LayoutRetention::waiting`] counts.
+    fn waited(&self, frame: u64) -> bool {
+        frame.wrapping_sub(self.claimed_in_frame) > 1
+    }
+}
+
 /// The measurements Taffy took of one measured node since the node was last
 /// dirtied: the constraints of each and the size it came out at, in the
 /// order they were last taken.
@@ -402,6 +418,9 @@ impl TaffyLayoutEngine {
             // would strand the first, so the second goes unkeyed.
             return Claim::Unkeyed;
         }
+        retention.waiting = retention
+            .waiting
+            .saturating_sub(node.waited(frame) as usize);
         node.claimed_in_frame = frame;
         node.lingers |= retention.list_rows > 0;
         retention.claimed_this_frame += 1;
@@ -453,6 +472,9 @@ impl TaffyLayoutEngine {
             if let Some(node) = retention.retained.get_mut(key)
                 && node.claimed_in_frame != frame
             {
+                retention.waiting = retention
+                    .waiting
+                    .saturating_sub(node.waited(frame) as usize);
                 node.claimed_in_frame = frame;
                 retention.claimed_this_frame += 1;
                 if retention.open_key_recordings > 0 {
@@ -473,6 +495,9 @@ impl TaffyLayoutEngine {
                 continue;
             };
             if node.claimed_in_frame != frame {
+                retention.waiting = retention
+                    .waiting
+                    .saturating_sub(node.waited(frame) as usize);
                 node.claimed_in_frame = frame;
                 retention.claimed_this_frame += 1;
             }
@@ -953,19 +978,27 @@ pub(crate) fn release_unclaimed_nodes(engine: &mut TaffyLayoutEngine) {
         retention.stats.nodes_freed += 1;
     }
 
-    // In a steady frame every retained node was claimed, and there is
-    // nothing to sweep.
-    if retention.retained.len() != retention.claimed_this_frame {
-        let frame = retention.frame;
+    // In a steady frame every retained node was claimed, or is one the last
+    // sweep left to linger and is not due yet, and there is nothing to sweep.
+    let frame = retention.frame;
+    let unclaimed_all_wait =
+        retention.retained.len() == retention.claimed_this_frame + retention.waiting;
+    if !unclaimed_all_wait || (retention.waiting > 0 && frame >= retention.waiting_until) {
         let taffy = &mut engine.taffy;
         let unstretched_styles = &mut retention.unstretched_styles;
         let robbed_parents = &mut retention.robbed_parents;
         let live = &mut retention.live;
         let freed = &mut retention.stats.nodes_freed;
+        let mut waiting = 0;
+        let mut waiting_until = u64::MAX;
         retention.retained.retain(|_, node| {
-            if node.claimed_in_frame == frame
-                || node.lingers && frame - node.claimed_in_frame < LIST_ROW_NODE_LINGER_FRAMES
-            {
+            if node.claimed_in_frame == frame {
+                return true;
+            }
+            if node.lingers && frame - node.claimed_in_frame < LIST_ROW_NODE_LINGER_FRAMES {
+                waiting += 1;
+                waiting_until =
+                    waiting_until.min(node.claimed_in_frame + LIST_ROW_NODE_LINGER_FRAMES);
                 return true;
             }
             unstretched_styles.remove(&node.id);
@@ -975,6 +1008,8 @@ pub(crate) fn release_unclaimed_nodes(engine: &mut TaffyLayoutEngine) {
             *freed += 1;
             false
         });
+        retention.waiting = waiting;
+        retention.waiting_until = waiting_until;
     }
 
     retention.claimed_this_frame = 0;

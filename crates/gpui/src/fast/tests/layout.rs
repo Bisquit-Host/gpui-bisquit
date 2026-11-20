@@ -934,3 +934,46 @@ fn a_moved_view_in_a_list_row_keeps_its_nodes_while_the_row_is_out_of_view() {
         "rows scrolled back into view should find the nodes they had: {back:?}"
     );
 }
+
+/// The nodes of a row out of view are released once they have lingered
+/// their time, though no frame until then has anything else to release, and
+/// none walks the retained nodes to find that out.
+#[test]
+fn nodes_of_a_row_out_of_view_are_released_when_due() {
+    let mut cx = TestAppContext::single();
+    let window = cx.add_window(|_, cx| ListOfViews {
+        list: crate::ListState::new(40, crate::ListAlignment::Top, px(0.)),
+        bodies: (0..40).map(|ix| cx.new(|_| ListRowBody { ix })).collect(),
+    });
+    let draw = |cx: &mut TestAppContext| {
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            window.layout_engine.as_ref().unwrap().node_count()
+        })
+        .unwrap()
+    };
+    cx.update_window(window.into(), |_, window, cx| {
+        window.set_view_retention(true);
+        if crate::fast::layers::COMPILED {
+            window.set_scroll_layers(false);
+        }
+        window.resize(size(px(400.), px(200.)));
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+
+    scroll_list_of_views(&mut cx, window, 10, px(0.));
+    scroll_list_of_views(&mut cx, window, 30, px(0.));
+    let lingering = draw(&mut cx);
+    for _ in 0..200 {
+        assert_eq!(draw(&mut cx), lingering, "kept while they linger");
+    }
+    for _ in 0..50 {
+        draw(&mut cx);
+    }
+    let released = draw(&mut cx);
+    assert!(released < lingering, "{released} nodes of {lingering} left");
+    // Back over the rows released: they are laid out anew, none found.
+    let back = scroll_list_of_views(&mut cx, window, 10, px(0.));
+    assert!(back.nodes_created > 0, "{back:?}");
+}
